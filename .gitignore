@@ -3,8 +3,16 @@ dist/
 .next/
 *.tsbuildinfo
 
-# host build output
-apps/host/build/
+# host build output. The linked binary is tracked so a VM can run the host
+# without MSVC, libwebrtc or the NVENC headers on it - see docs/AUTOMATION.md.
+# Git cannot re-include a file whose parent directory is excluded, so each
+# level is opened with dir/* rather than dir/ before the exe is negated.
+apps/host/build/*
+!apps/host/build/bin/
+apps/host/build/bin/*
+!apps/host/build/bin/Release/
+apps/host/build/bin/Release/*
+!apps/host/build/bin/Release/glsplay-host.exe
 apps/host/out/
 
 # third-party SDKs fetched under their own licence - see vm-scripts/fetch-deps.ps1
