@@ -100,6 +100,19 @@ Open items, roughly in the order they should be dealt with.
 
 ---
 
+## Image lifecycle
+
+- [ ] **A baked image runs stale code and nothing says so.** The image carries a
+      `git clone` pinned to the commit it was baked from, and the `tools` stage that
+      would update it is skipped on image boot (`bake-image.ps1` rewinds to `account`).
+      So pushing to the branch does not reach existing images, and the symptom is a
+      fix that appears not to work.
+
+      Options: a `git pull` in `boot.ps1`; or stamp the baked commit somewhere
+      `boot.log` prints, so the running code is at least identifiable. Pulling at boot
+      trades reproducibility for freshness — an instance would no longer be pinned to
+      what was tested — so stamping is probably the safer first move.
+
 ## Next phase
 
 - [ ] **Replace the host's scheduled task with a supervisor service.** A Windows service

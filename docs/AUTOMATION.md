@@ -61,6 +61,11 @@ Ports 8080 and 3000 belong to the control-plane box, not to this one.
 The sections below describe what that script automates, and are what you want
 when a stage fails or when you are baking an image to skip the 30 minutes.
 
+> Prefer to watch each step, or finishing a stage the script stopped on?
+> **`docs/MANUAL-BAKE.md`** walks the same sequence by hand: manual for the
+> once-only half (tools, driver, display), then hands the per-instance half
+> (account, tasks) back to this script, because those two cannot be baked in.
+
 ---
 
 ## 1. Metadata keys
