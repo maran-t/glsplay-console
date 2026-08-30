@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { StreamPlayer } from '@/components/StreamPlayer';
 import { StatsOverlay } from '@/components/StatsOverlay';
 import { useInputCapture } from '@/hooks/useInputCapture';
@@ -30,19 +30,65 @@ export default function Page() {
     return () => document.removeEventListener('fullscreenchange', onChange);
   }, []);
 
-  const config = useMemo<WebRTCConfig | null>(() => {
-    const signalingUrl = process.env['NEXT_PUBLIC_SIGNALING_URL'];
-    const roomId = process.env['NEXT_PUBLIC_ROOM_ID'];
-    const secret = process.env['NEXT_PUBLIC_ROOM_SECRET'];
-    if (!signalingUrl || !roomId || !secret) return null;
-    return {
-      signalingUrl,
-      roomId,
-      secret,
-      maxBitrateKbps: DEFAULT_MAX_BITRATE_KBPS,
-      // STUN only. The host has a public IP, so its host candidate should win
-      // outright - a relay would add a hop the latency budget cannot absorb.
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+  const [config, setConfig] = useState<WebRTCConfig | null>(null);
+  const [configLoading, setConfigLoading] = useState(true);
+
+  // Runtime config first, build-time env second. On a VM booted from an image
+  // the room and secret arrive from GCE metadata and are served by
+  // /api/session, so the bundle is built once at bake time rather than per
+  // session. The NEXT_PUBLIC_ fallback keeps `npm run dev` on a laptop working
+  // from nothing but a .env file.
+  useEffect(() => {
+    let cancelled = false;
+
+    const build = (
+      signalingUrl?: string,
+      roomId?: string,
+      secret?: string,
+    ): WebRTCConfig | null => {
+      if (!signalingUrl || !roomId || !secret) return null;
+      return {
+        signalingUrl,
+        roomId,
+        secret,
+        maxBitrateKbps: DEFAULT_MAX_BITRATE_KBPS,
+        // STUN only. The host has a public IP, so its host candidate should win
+        // outright - a relay would add a hop the latency budget cannot absorb.
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+      };
+    };
+
+    void (async () => {
+      let resolved: WebRTCConfig | null = null;
+      try {
+        const res = await fetch('/api/session', { cache: 'no-store' });
+        if (res.ok) {
+          const body = (await res.json()) as {
+            signalingUrl?: string;
+            roomId?: string;
+            secret?: string;
+          };
+          resolved = build(body.signalingUrl, body.roomId, body.secret);
+        }
+      } catch {
+        // Served statically, or the route is unreachable - fall through.
+      }
+
+      if (!resolved) {
+        resolved = build(
+          process.env['NEXT_PUBLIC_SIGNALING_URL'],
+          process.env['NEXT_PUBLIC_ROOM_ID'],
+          process.env['NEXT_PUBLIC_ROOM_SECRET'],
+        );
+      }
+
+      if (cancelled) return;
+      setConfig(resolved);
+      setConfigLoading(false);
+    })();
+
+    return () => {
+      cancelled = true;
     };
   }, []);
 
@@ -68,15 +114,30 @@ export default function Page() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
+  if (configLoading) {
+    return (
+      <main className="flex h-full items-center justify-center p-8">
+        <p className="font-mono text-sm text-muted">Loading session…</p>
+      </main>
+    );
+  }
+
   if (!config) {
     return (
       <main className="flex h-full items-center justify-center p-8">
         <div className="max-w-md rounded-lg border border-edge bg-panel p-6">
           <h1 className="mb-3 font-mono text-sm text-bad">Configuration missing</h1>
           <p className="mb-4 text-sm leading-relaxed text-muted">
-            Copy <code className="font-mono text-ink">.env.example</code> to{' '}
-            <code className="font-mono text-ink">.env</code> at the repository root and set the
-            values below, then restart the dev server.
+            On a VM these come from instance metadata (
+            <code className="font-mono text-ink">glsplay-room</code>,{' '}
+            <code className="font-mono text-ink">glsplay-secret</code>) via{' '}
+            <code className="font-mono text-ink">/api/session</code> — check{' '}
+            <code className="font-mono text-ink">boot.log</code>.
+          </p>
+          <p className="mb-4 text-sm leading-relaxed text-muted">
+            Running locally, copy <code className="font-mono text-ink">.env.example</code> to{' '}
+            <code className="font-mono text-ink">.env</code> at the repository root, set the values
+            below, and restart the dev server.
           </p>
           <ul className="flex flex-col gap-1 font-mono text-xs text-muted">
             <li>NEXT_PUBLIC_SIGNALING_URL</li>

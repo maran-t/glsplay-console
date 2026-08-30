@@ -1,71 +1,205 @@
 <#
-  One-shot headless-capture setup for glsplay on this GCP L4 box.
-  Run once (self-elevates). After this, the only recurring action is:
-  disconnect RDP  ->  stream runs ;  reconnect RDP  ->  stream pauses.
+.SYNOPSIS
+  Registers the glsplay task graph on this VM. Run once, at image-bake time.
+
+.DESCRIPTION
+  Self-elevates. Nothing it writes is per-instance: every value the running
+  system needs comes from GCE metadata at boot, so an image baked after this
+  script runs will stream on any instance created from it without being
+  touched.
+
+  The task graph:
+
+    glsplay-boot        At startup        SYSTEM  vm-scripts\boot.ps1
+                        -> metadata into machine env + apps\web\.env,
+                           then starts the two service tasks in order
+    glsplay-signaling   (none, on demand) SYSTEM  npm start -w @glsplay/signaling
+    glsplay-web         (none, on demand) SYSTEM  npm start -w @glsplay/web
+    glsplay-host        At logon +delay   user    run-host.ps1
+    glsplay-reclaim     RDP disconnect    SYSTEM  vdd\reclaim-console.ps1
+
+  glsplay-host hangs off the logon trigger because Desktop Duplication can only
+  capture the session that owns the display, and with autologon that session
+  exists from boot. glsplay-reclaim is now the exception path, not the happy
+  path: it only matters if a human RDPs in and then disconnects, which in
+  production nobody does.
+
+.EXAMPLE
+  .\setup-headless.ps1
+  .\setup-headless.ps1 -User someuser -HostStartDelaySec 60
 #>
 
-# --- self-elevate ----------------------------------------------------------
+[CmdletBinding()]
+param(
+  # Defaults to the configured autologon user - the account that will own the
+  # console session, which is the only one that can capture.
+  [string]$User,
+  [string]$RepoRoot = (Split-Path -Parent $PSScriptRoot),
+  [string]$NpmPath,
+  # Gives the VDD, the network and the broker time to come up before capture
+  # starts. The host retries, but a clean first attempt keeps host.log readable.
+  [int]$HostStartDelaySec = 45
+)
+
+# --- self-elevate (forwarding what we were given) ---------------------------
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
         ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-  Start-Process powershell.exe "-ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
+  $forward = @("-ExecutionPolicy Bypass -File `"$PSCommandPath`"")
+  if ($User)    { $forward += "-User `"$User`"" }
+  if ($RepoRoot){ $forward += "-RepoRoot `"$RepoRoot`"" }
+  if ($NpmPath) { $forward += "-NpmPath `"$NpmPath`"" }
+  $forward += "-HostStartDelaySec $HostStartDelaySec"
+  Start-Process powershell.exe ($forward -join ' ') -Verb RunAs
   exit
 }
 
 $ErrorActionPreference = 'Stop'
-$repo = 'C:\glsplay'
-$user = 'maranmani_t99'
-$npm  = 'C:\Program Files\nodejs\npm.cmd'
 
-function Ok($m){ Write-Host "  [ok] $m" -ForegroundColor Green }
-function Info($m){ Write-Host "==> $m" -ForegroundColor Cyan }
+function Ok   { param($m) Write-Host "  [ok] $m" -ForegroundColor Green }
+function Warn { param($m) Write-Host "  [!!] $m" -ForegroundColor Yellow }
+function Info { param($m) Write-Host "`n==> $m" -ForegroundColor Cyan }
 
-# --- 1. room secret as a machine env var ---------------------------------
-Info 'Room secret'
-$sec = ((Get-Content "$repo\.env" | Where-Object { $_ -match '^GLSPLAY_ROOM_SECRET=' }) -replace '^GLSPLAY_ROOM_SECRET=','').Trim()
-if ($sec.Length -ne 64) { Write-Warning "secret length $($sec.Length), expected 64 - check .env" }
-[Environment]::SetEnvironmentVariable('GLSPLAY_ROOM_SECRET', $sec, 'Machine')
-Ok "GLSPLAY_ROOM_SECRET set for the machine ($($sec.Length) chars)"
+# --- 0. resolve what used to be hardcoded -----------------------------------
 
-# --- 2. helper to (re)register a session-state task ---------------------
-function New-StateTask($name, $file, $stateChange, $runAs, $args='') {
-  $a = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-ExecutionPolicy Bypass -File `"$file`" $args"
-  $s = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
-  $t = $null
-  if ($stateChange) {
-    $t = New-CimInstance -CimClass (Get-CimClass MSFT_TaskSessionStateChangeTrigger root/Microsoft/Windows/TaskScheduler) -ClientOnly -Property @{ StateChange = $stateChange }
-  }
-  if ($t) {
-    Register-ScheduledTask -TaskName $name -Action $a -Trigger $t -Settings $s -User $runAs -RunLevel Highest -Force | Out-Null
+Info 'Resolving environment'
+
+if (-not $User) {
+  $winlogon = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
+  $User = (Get-ItemProperty -Path $winlogon -Name 'DefaultUserName' -ErrorAction SilentlyContinue).DefaultUserName
+  if ($User) {
+    Ok "autologon user from the registry: $User"
   } else {
-    Register-ScheduledTask -TaskName $name -Action $a -Settings $s -User $runAs -RunLevel Highest -Force | Out-Null
+    $User = $env:USERNAME
+    Warn "no autologon user configured; falling back to $User"
+    Warn 'Run vm-scripts\setup-gcp-vm.ps1 with -AutoLogonUser and -AutoLogonPassword'
+    Warn 'first, or the console session is empty after a reboot and nothing captures.'
   }
-  Ok "task '$name'  (runAs=$runAs, trigger=$(if($stateChange){"stateChange $stateChange"}else{'on-demand'}))"
 }
 
-# --- 3. signaling + web at boot (so a reboot doesn't need you) ---------
-Info 'Signaling + web startup tasks'
+if (-not $NpmPath) {
+  $cmd = Get-Command npm.cmd -ErrorAction SilentlyContinue
+  if ($cmd) { $NpmPath = $cmd.Source } else { $NpmPath = 'C:\Program Files\nodejs\npm.cmd' }
+}
+if (-not (Test-Path $NpmPath)) { throw "npm not found at $NpmPath - install Node.js or pass -NpmPath" }
+
+Ok "repo     $RepoRoot"
+Ok "user     $User"
+Ok "npm      $NpmPath"
+
+. (Join-Path $RepoRoot 'vm-scripts\session-config.ps1')
+$cfg = Get-GlsplaySessionConfig -RepoRoot $RepoRoot
+if ($cfg.OnGce) {
+  Ok "metadata reachable (instance $($cfg.InstanceName), zone $($cfg.Zone))"
+} else {
+  Ok 'metadata not reachable - falling back to environment and .env'
+}
+
+# --- 1. room secret ---------------------------------------------------------
+
+Info 'Room secret'
+if ($cfg.Secret) {
+  [Environment]::SetEnvironmentVariable('GLSPLAY_ROOM_SECRET', $cfg.Secret, 'Machine')
+  Ok "GLSPLAY_ROOM_SECRET set for the machine ($($cfg.Secret.Length) chars)"
+  if ($cfg.Secret.Length -ne 64) { Warn 'expected 64 chars from a 32-byte hex secret' }
+} else {
+  Warn 'No secret found. That is fine for an image bake - glsplay-boot reads it'
+  Warn 'from instance metadata (glsplay-secret) on every boot.'
+}
+
+# --- 2. task helpers --------------------------------------------------------
+
+$common = @{
+  ExecutionTimeLimit         = [TimeSpan]::Zero
+  AllowStartIfOnBatteries    = $true
+  DontStopIfGoingOnBatteries = $true
+  MultipleInstances          = 'IgnoreNew'
+}
+
+function Register-GlsplayTask {
+  param(
+    [Parameter(Mandatory)][string]$Name,
+    [Parameter(Mandatory)]$Action,
+    $Trigger,
+    [Parameter(Mandatory)]$Principal,
+    $Settings
+  )
+  if (-not $Settings) { $Settings = New-ScheduledTaskSettingsSet @common }
+  $params = @{
+    TaskName  = $Name
+    Action    = $Action
+    Principal = $Principal
+    Settings  = $Settings
+    Force     = $true
+  }
+  if ($Trigger) { $params['Trigger'] = $Trigger }
+  Register-ScheduledTask @params | Out-Null
+  Ok "task '$Name'"
+}
+
+function New-PsAction {
+  param([string]$File, [string]$Arguments = '')
+  New-ScheduledTaskAction -Execute 'powershell.exe' `
+    -Argument ("-ExecutionPolicy Bypass -NonInteractive -File `"$File`" $Arguments").Trim()
+}
+
+$systemPrincipal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' `
+  -LogonType ServiceAccount -RunLevel Highest
+
+# Interactive is the important bit: the task runs inside the logged-on desktop
+# session. An S4U or ServiceAccount principal lands in session 0, which has no
+# desktop, and Desktop Duplication then has nothing to duplicate.
+$userPrincipal = New-ScheduledTaskPrincipal -UserId $User `
+  -LogonType Interactive -RunLevel Highest
+
+# --- 3. boot task -----------------------------------------------------------
+
+Info 'Boot config task'
+Register-GlsplayTask -Name 'glsplay-boot' `
+  -Action (New-PsAction (Join-Path $RepoRoot 'vm-scripts\boot.ps1')) `
+  -Trigger (New-ScheduledTaskTrigger -AtStartup) `
+  -Principal $systemPrincipal
+
+# --- 4. service tasks (started by glsplay-boot, no trigger of their own) ----
+
+Info 'Service tasks'
+$serviceSettings = New-ScheduledTaskSettingsSet @common `
+  -RestartInterval (New-TimeSpan -Minutes 1) -RestartCount 5
+
 foreach ($svc in @(
-  @{ n='glsplay-signaling'; w='@glsplay/signaling' },
-  @{ n='glsplay-web';       w='@glsplay/web' })) {
-  $a = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument "/c `"cd /d $repo && `"$npm`" run start -w $($svc.w)`""
-  $trg = New-ScheduledTaskTrigger -AtStartup
-  $s = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -RestartInterval (New-TimeSpan -Minutes 1) -RestartCount 5
-  Register-ScheduledTask -TaskName $svc.n -Action $a -Trigger $trg -Settings $s -User 'SYSTEM' -RunLevel Highest -Force | Out-Null
-  Ok "task '$($svc.n)' at startup"
+    @{ n = 'glsplay-signaling'; w = '@glsplay/signaling' },
+    @{ n = 'glsplay-web';       w = '@glsplay/web' })) {
+  $action = New-ScheduledTaskAction -Execute 'cmd.exe' `
+    -Argument "/c `"cd /d `"$RepoRoot`" && `"$NpmPath`" run start -w $($svc.w)`""
+  Register-GlsplayTask -Name $svc.n -Action $action `
+    -Principal $systemPrincipal -Settings $serviceSettings
 }
 
-# --- 4. host + console-reclaim tasks ----------------------------------
-Info 'Host + console reclaim'
-# host: on-demand only; reclaim-console.ps1 fires it after tscon
-New-StateTask 'glsplay-host' "$repo\run-host.ps1" $null $user
-# reclaim: SYSTEM, on RDP disconnect -> tscon session to console -> run host
-New-StateTask 'glsplay-reclaim' "$repo\vdd\reclaim-console.ps1" 4 'SYSTEM'
+# --- 5. host task -----------------------------------------------------------
 
-# --- 5. lock / power hardening (idempotent) ---------------------------
+Info 'Host task'
+$logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $User
+$logonTrigger.Delay = "PT${HostStartDelaySec}S"
+Register-GlsplayTask -Name 'glsplay-host' `
+  -Action (New-PsAction (Join-Path $RepoRoot 'run-host.ps1')) `
+  -Trigger $logonTrigger -Principal $userPrincipal
+Ok "starts $HostStartDelaySec seconds after $User logs on to the console"
+
+# --- 6. reclaim task (exception path) ---------------------------------------
+
+Info 'Console reclaim (only needed after a human RDPs in)'
+$disconnect = New-CimInstance -ClientOnly `
+  -CimClass (Get-CimClass MSFT_TaskSessionStateChangeTrigger root/Microsoft/Windows/TaskScheduler) `
+  -Property @{ StateChange = 4 }   # 4 = RemoteDisconnect
+Register-GlsplayTask -Name 'glsplay-reclaim' `
+  -Action (New-PsAction (Join-Path $RepoRoot 'vdd\reclaim-console.ps1')) `
+  -Trigger $disconnect -Principal $systemPrincipal
+
+# --- 7. lock / power hardening (idempotent) ---------------------------------
+
 Info 'Lock / power'
 $sys = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
-Set-ItemProperty $sys PromptOnSecureDesktop -Value 0 -Type DWord
-Set-ItemProperty $sys InactivityTimeoutSecs -Value 0 -Type DWord
+Set-ItemProperty $sys PromptOnSecureDesktop  -Value 0 -Type DWord
+Set-ItemProperty $sys InactivityTimeoutSecs  -Value 0 -Type DWord
 Set-ItemProperty $sys DisableLockWorkstation -Value 1 -Type DWord
 $per = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization'
 New-Item $per -Force | Out-Null
@@ -74,23 +208,25 @@ powercfg /change monitor-timeout-ac 0 | Out-Null
 powercfg /change standby-timeout-ac 0 | Out-Null
 Ok 'secure desktop off, no auto-lock, no sleep'
 
-# --- 6. status --------------------------------------------------------
+# --- 8. status --------------------------------------------------------------
+
 Info 'Status'
 Get-ScheduledTask glsplay-* | Select-Object TaskName, State | Format-Table -AutoSize
-$sig = 'DOWN'
-try { $sig = (Invoke-RestMethod http://localhost:8080/health -TimeoutSec 3).status } catch { }
-Write-Host "signaling: $sig"
-$web = 'DOWN'
-try { $web = (Invoke-WebRequest http://localhost:3000 -TimeoutSec 3 -UseBasicParsing).StatusCode } catch { }
-Write-Host "web 3000 : $web"
+
+if ($cfg.ExternalIp) { $browseAt = "http://$($cfg.ExternalIp):3000" }
+else                 { $browseAt = 'http://<vm-external-ip>:3000' }
 
 Write-Host ''
 Write-Host '-----------------------------------------------------------' -ForegroundColor DarkGray
-Write-Host ' Done. From now on:' -ForegroundColor White
-Write-Host '   * Disconnect RDP (X, not Sign out)  -> host starts, stream works' -ForegroundColor Gray
-Write-Host '   * Browser on laptop: http://34.180.13.189:3000' -ForegroundColor Gray
-Write-Host '   * Reconnect RDP only to check logs (it pauses the stream):' -ForegroundColor Gray
-Write-Host '       Get-Content C:\glsplay\reclaim-console.log' -ForegroundColor Gray
-Write-Host '       Get-Content C:\glsplay\host.log.res' -ForegroundColor Gray
-Write-Host '       Get-Content C:\glsplay\host.log -Tail 40' -ForegroundColor Gray
+Write-Host ' Registered. This machine is now image-bakeable.' -ForegroundColor White
+Write-Host ''
+Write-Host '   Bake:   gcloud compute instances stop <instance>' -ForegroundColor Gray
+Write-Host '           gcloud compute images create glsplay-<date> --source-disk <disk>' -ForegroundColor Gray
+Write-Host ''
+Write-Host '   Launch: gcloud compute instances create <name> --image glsplay-<date> \' -ForegroundColor Gray
+Write-Host '             --metadata glsplay-room=<room>,glsplay-secret=<secret>' -ForegroundColor Gray
+Write-Host ''
+Write-Host "   Play:   $browseAt" -ForegroundColor Gray
+Write-Host ''
+Write-Host '   Logs:   boot.log  host.log (+ .prev, .res)  reclaim-console.log' -ForegroundColor Gray
 Write-Host '-----------------------------------------------------------' -ForegroundColor DarkGray
