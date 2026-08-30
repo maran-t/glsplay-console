@@ -113,7 +113,10 @@ export function StreamPlayer({
     } else if (cursorUrl) {
       video.style.cursor = `url(${cursorUrl}) ${cursor?.hotspotX ?? 0} ${cursor?.hotspotY ?? 0}, auto`;
     } else {
-      video.style.cursor = '';
+      // No cursor shape from the host means it is compositing the pointer into
+      // the video itself. Showing the browser's arrow as well would put two
+      // pointers on screen, one of them a frame of latency behind the other.
+      video.style.cursor = 'none';
     }
   }, [started, mode, cursor, cursorUrl, videoRef]);
 
