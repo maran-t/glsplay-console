@@ -239,10 +239,20 @@ powershell -ExecutionPolicy Bypass -File C:\glsplay\vdd\setup-headless.ps1
 
 | Task | Trigger | Runs as | Action |
 |---|---|---|---|
-| `glsplay-signaling` | At startup | SYSTEM | `cmd /c "cd /d C:\glsplay && npm.cmd run start -w @glsplay/signaling"` |
-| `glsplay-web` | At startup | SYSTEM | same for `@glsplay/web` |
-| `glsplay-host` | *(none — on demand)* | `maranmani_t99` | `powershell -File C:\glsplay\run-host.ps1` |
+| `glsplay-boot` | At startup | SYSTEM | `powershell -File C:\glsplay\vm-scripts\boot.ps1` |
+| `glsplay-signaling` | *(none — started by `glsplay-boot`)* | SYSTEM | `cmd /c "cd /d C:\glsplay && npm.cmd run start -w @glsplay/signaling"` |
+| `glsplay-web` | *(none — started by `glsplay-boot`)* | SYSTEM | same for `@glsplay/web` |
+| `glsplay-host` | **At logon + 45s** | autologon user | `powershell -File C:\glsplay\run-host.ps1` |
 | `glsplay-reclaim` | **Session RemoteDisconnect** | SYSTEM | `powershell -File C:\glsplay\vdd\reclaim-console.ps1` |
+
+> The script takes no per-VM values any more — it reads the autologon user from
+> the registry and everything else from GCE instance metadata at boot. Pass
+> `-User` / `-RepoRoot` to override. See **`docs/AUTOMATION.md`** for the
+> metadata keys, and for baking this VM's disk into a reusable image.
+
+Because the host now starts at logon, a normal boot streams with nobody logged
+in over RDP at all. The flow below is what happens when a human *has* RDP'd in —
+the exception path, not the daily one.
 
 **Flow when you disconnect RDP:**
 

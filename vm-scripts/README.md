@@ -2,6 +2,12 @@
 
 Provisioning and verification for the glsplay host VM.
 
+> Building **one** VM by hand? This file, then `docs/DEPLOY-GCP-L4.md`.
+> Making that VM into an image other instances boot from unattended?
+> **`docs/AUTOMATION.md`** — `session-config.ps1` and `boot.ps1` below are that
+> layer, and they take their values from GCE instance metadata, not from files
+> you edit on the box.
+
 ## Order of operations
 
 | # | Script | Where | Notes |
@@ -13,6 +19,14 @@ Provisioning and verification for the glsplay host VM.
 | 4 | `setup-firewall.ps1` | The VM (admin) | Windows Firewall — a separate layer from the VPC rules |
 | 5 | *reboot* | The VM | Required for the driver and auto-logon |
 | 6 | `check-environment.ps1` | The VM (console) | Verifies everything. Run after every reboot |
+| 7 | `..\vdd\setup-headless.ps1` | The VM (admin) | Registers the task graph. After this the VM is image-bakeable |
+
+Two scripts here are not steps — they run themselves:
+
+| Script | When | Notes |
+|---|---|---|
+| `session-config.ps1` | Dot-sourced | Resolves room/secret/broker from metadata → env → `.env` → default. `-Show` prints what an instance resolved |
+| `boot.ps1` | Every boot, as SYSTEM | Metadata into machine env + `apps\web\.env`, then starts the broker and web app in order. Logs to `boot.log` |
 
 ## Getting started
 
