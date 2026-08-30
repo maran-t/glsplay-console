@@ -7,9 +7,9 @@
   you have verified actually streams. Afterwards, stop the instance and create
   an image from its disk.
 
-  What the image keeps - the slow half, about thirty minutes:
-    Node and Git, the cloned repo, the GRID/vWS driver in WDDM mode, the MTT
-    virtual display device, and the built JS workspaces.
+  What the image keeps - the slow half, about twenty-five minutes:
+    Git, the cloned repo including the host binary, the GRID/vWS driver in WDDM
+    mode, and the MTT virtual display device.
 
   What it must not keep - anything naming one instance:
     the room secret in three places, the autologon password, the local account,
@@ -82,16 +82,18 @@ $vdd = Get-PnpDevice -Class Display -ErrorAction SilentlyContinue |
 if ($vdd) { Ok "virtual display: $($vdd.FriendlyName) [$($vdd.Status)]" }
 else       { Warn 'no virtual display device - the image will not be able to capture' }
 
-foreach ($d in @('dist', '.next')) {
-  $built = Get-ChildItem -Path $RepoRoot -Recurse -Directory -Filter $d -ErrorAction SilentlyContinue |
-           Select-Object -First 1
-  if ($built) { Ok "built output present ($d)" } else { Warn "no $d found - did the build stage run?" }
+. (Join-Path $PSScriptRoot 'session-config.ps1')
+$cfg = Get-GlsplaySessionConfig -RepoRoot $RepoRoot
+if ($cfg.SignalingUrl -match '^wss?://(localhost|127\.0\.0\.1)') {
+  Warn 'signaling url points at localhost - set glsplay-signaling-url to the central broker'
+} else {
+  Ok "signaling url $($cfg.SignalingUrl)"
 }
 
 # --- 2. stop everything -----------------------------------------------------
 
 Info 'Stopping tasks'
-foreach ($t in @('glsplay-host', 'glsplay-web', 'glsplay-signaling', 'glsplay-reclaim', 'glsplay-boot')) {
+foreach ($t in @('glsplay-host', 'glsplay-reclaim', 'glsplay-boot', 'glsplay-web', 'glsplay-signaling')) {
   $task = Get-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue
   if ($task) {
     Stop-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue
@@ -99,16 +101,18 @@ foreach ($t in @('glsplay-host', 'glsplay-web', 'glsplay-signaling', 'glsplay-re
     Ok "removed task $t"
   }
 }
-Get-Process -Name 'node', 'glsplay-host' -ErrorAction SilentlyContinue |
+Get-Process -Name 'glsplay-host', 'node' -ErrorAction SilentlyContinue |
   Stop-Process -Force -ErrorAction SilentlyContinue
-Ok 'stopped node and host processes'
+Ok 'stopped host process'
 
 # --- 3. secrets -------------------------------------------------------------
 
 Info 'Removing secrets'
 
-# Both .env files carry the room secret. boot.ps1 rewrites both from metadata
-# before starting anything, so removing them here is safe as well as necessary.
+# The root .env carries the room secret. boot.ps1 rewrites it from metadata on
+# every boot, which is what makes deleting it here safe as well as necessary.
+# apps\web\.env is only present on images predating the central control plane;
+# remove it if an older disk still has one.
 foreach ($f in @((Join-Path $RepoRoot '.env'), (Join-Path $RepoRoot 'apps\web\.env'))) {
   if (Test-Path $f) { Remove-Item $f -Force; Ok "removed $f" }
 }
@@ -116,13 +120,24 @@ foreach ($f in @((Join-Path $RepoRoot '.env'), (Join-Path $RepoRoot 'apps\web\.e
 [Environment]::SetEnvironmentVariable('GLSPLAY_ROOM_SECRET', $null, 'Machine')
 Ok 'cleared machine GLSPLAY_ROOM_SECRET'
 
-# Autologon stores the password in the registry in clear text. Baking that into
-# an image would ship one password to every instance that ever boots from it.
+# Clear the autologon credentials both ways they can be stored: the registry
+# values, and the LSA secret that Sysinternals Autologon writes instead. The
+# account itself is removed below, so a surviving LSA secret would name a user
+# that no longer exists - untidy rather than dangerous, but the whole point of
+# this script is that nothing identifying one instance leaves on the disk.
 $winlogon = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
 foreach ($v in @('DefaultPassword', 'DefaultUserName', 'AutoAdminLogon')) {
   Remove-ItemProperty -Path $winlogon -Name $v -ErrorAction SilentlyContinue
 }
-Ok 'cleared autologon credentials'
+Ok 'cleared autologon registry values'
+
+$autologon = Join-Path $env:TEMP 'Autologon64.exe'
+if (Test-Path $autologon) {
+  & $autologon /accepteula /delete 2>&1 | Out-Null
+  Ok 'cleared the autologon LSA secret'
+} else {
+  Warn 'Autologon64.exe not present - if the LSA secret was set, clear it with: Autologon64.exe /delete'
+}
 
 $user = Get-LocalUser -Name $AutoLogonUser -ErrorAction SilentlyContinue
 if ($user) {

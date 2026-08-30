@@ -58,17 +58,26 @@ Open items, roughly in the order they should be dealt with.
 
 ## Simplification — now that the control plane is external
 
-- [ ] **Strip the Node half out of the VM image.** Signaling and web run on
-      `play.resrve.xyz`, so the GPU VM no longer needs them. Remove `provision.ps1`'s
-      `build` stage, the `glsplay-signaling` and `glsplay-web` tasks from
-      `setup-headless.ps1`, and the `apps/web/.env` write from `boot.ps1`. Faster bake,
-      smaller image, less to go wrong.
+- [x] **Strip the Node half out of the VM image.** The `build` stage became `check`,
+      the Node install is gone, the `glsplay-signaling` and `glsplay-web` tasks are
+      unregistered, and `boot.ps1` no longer writes `apps/web/.env`. Two stages that
+      could fail a bake — `npm install` needing the network, `next build` running out
+      of memory — no longer exist.
 
-- [ ] **Close the GPU VM's inbound TCP.** With the host dialling out, ports 8080 and
-      3000 no longer need to be reachable. Leave only UDP 50000-50100.
+- [x] **Close the GPU VM's inbound TCP.** Docs now create only the UDP 50000-50100
+      rule. Verify the old `glsplay-signaling` / `glsplay-web` VPC rules are gone
+      from the project if nothing else uses them.
 
-- [ ] **Remove dead code in `provision.ps1`.** `Test-Reboot` (:79) is defined and never
-      called — the reboots ended up explicit instead.
+- [x] **Remove dead code.** `Test-Reboot` in `provision.ps1` and `Write-GlsplayWebEnv`
+      in `session-config.ps1`, both unreferenced.
+
+- [x] **Autologon password out of the plaintext registry.** `provision.ps1` now
+      re-applies it with Sysinternals Autologon, which stores it as an LSA secret,
+      and clears `DefaultPassword`. `bake-image.ps1` clears both forms.
+
+- [x] **Restart-on-failure for the host task.** Three retries a minute apart. Not a
+      substitute for a supervisor service — it cannot relaunch across a session
+      change — but it covers the ordinary case of the host exiting.
 
 ---
 

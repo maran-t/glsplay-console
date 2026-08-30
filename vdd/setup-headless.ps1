@@ -11,12 +11,14 @@
   The task graph:
 
     glsplay-boot        At startup        SYSTEM  vm-scripts\boot.ps1
-                        -> metadata into machine env + apps\web\.env,
-                           then starts the two service tasks in order
-    glsplay-signaling   (none, on demand) SYSTEM  npm start -w @glsplay/signaling
-    glsplay-web         (none, on demand) SYSTEM  npm start -w @glsplay/web
+                        -> instance metadata into the machine environment
+                           and the root .env
     glsplay-host        At logon +delay   user    run-host.ps1
     glsplay-reclaim     RDP disconnect    SYSTEM  vdd\reclaim-console.ps1
+
+  The broker and the web client used to run here too. They are now one central
+  deployment behind TLS that every VM dials out to, so this machine runs a
+  single native binary and needs no JS runtime at all.
 
   glsplay-host hangs off the logon trigger because Desktop Duplication can only
   capture the session that owns the display, and with autologon that session
@@ -76,15 +78,8 @@ if (-not $User) {
   }
 }
 
-if (-not $NpmPath) {
-  $cmd = Get-Command npm.cmd -ErrorAction SilentlyContinue
-  if ($cmd) { $NpmPath = $cmd.Source } else { $NpmPath = 'C:\Program Files\nodejs\npm.cmd' }
-}
-if (-not (Test-Path $NpmPath)) { throw "npm not found at $NpmPath - install Node.js or pass -NpmPath" }
-
 Ok "repo     $RepoRoot"
 Ok "user     $User"
-Ok "npm      $NpmPath"
 
 . (Join-Path $RepoRoot 'vm-scripts\session-config.ps1')
 $cfg = Get-GlsplaySessionConfig -RepoRoot $RepoRoot
@@ -159,19 +154,19 @@ Register-GlsplayTask -Name 'glsplay-boot' `
   -Trigger (New-ScheduledTaskTrigger -AtStartup) `
   -Principal $systemPrincipal
 
-# --- 4. service tasks (started by glsplay-boot, no trigger of their own) ----
+# --- 4. remove the old service tasks ----------------------------------------
 
-Info 'Service tasks'
-$serviceSettings = New-ScheduledTaskSettingsSet @common `
-  -RestartInterval (New-TimeSpan -Minutes 1) -RestartCount 5
-
-foreach ($svc in @(
-    @{ n = 'glsplay-signaling'; w = '@glsplay/signaling' },
-    @{ n = 'glsplay-web';       w = '@glsplay/web' })) {
-  $action = New-ScheduledTaskAction -Execute 'cmd.exe' `
-    -Argument "/c `"cd /d `"$RepoRoot`" && `"$NpmPath`" run start -w $($svc.w)`""
-  Register-GlsplayTask -Name $svc.n -Action $action `
-    -Principal $systemPrincipal -Settings $serviceSettings
+# The broker and the web client used to run here, one copy per VM. They are now
+# a single central deployment behind TLS, which this machine dials out to - so
+# these tasks are not merely unused, they would bind ports and serve a stale
+# config if an old image still carried them.
+Info 'Removing superseded service tasks'
+foreach ($stale in @('glsplay-signaling', 'glsplay-web')) {
+  if (Get-ScheduledTask -TaskName $stale -ErrorAction SilentlyContinue) {
+    Stop-ScheduledTask -TaskName $stale -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask -TaskName $stale -Confirm:$false -ErrorAction SilentlyContinue
+    Ok "removed $stale"
+  }
 }
 
 # --- 5. host task -----------------------------------------------------------
@@ -179,10 +174,19 @@ foreach ($svc in @(
 Info 'Host task'
 $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $User
 $logonTrigger.Delay = "PT${HostStartDelaySec}S"
+
+# Restart on failure. This is not a substitute for a supervisor service - it
+# cannot relaunch across a session change, and nothing external can command it -
+# but it covers the ordinary case of the host exiting, which otherwise waits
+# for the next logon.
+$hostSettings = New-ScheduledTaskSettingsSet @common `
+  -RestartInterval (New-TimeSpan -Minutes 1) -RestartCount 3
+
 Register-GlsplayTask -Name 'glsplay-host' `
   -Action (New-PsAction (Join-Path $RepoRoot 'run-host.ps1')) `
-  -Trigger $logonTrigger -Principal $userPrincipal
+  -Trigger $logonTrigger -Principal $userPrincipal -Settings $hostSettings
 Ok "starts $HostStartDelaySec seconds after $User logs on to the console"
+Ok 'restarts up to 3 times, one minute apart, if it exits'
 
 # --- 6. reclaim task (exception path) ---------------------------------------
 

@@ -16,10 +16,10 @@
   starting over.
 
   Stages, each idempotent:
-    1 tools     Node.js, Git, clone the repo
+    1 tools     Git, clone the repo (the host binary comes with it)
     2 driver    replace the compute/TCC driver with GRID/vWS  (2 reboots)
     3 display   vdd_settings.xml, then the MTT VDD via nefcon (no GUI wizard)
-    4 build     npm install and build the three workspaces
+    4 check     verify the host binary and that the broker is reachable
     5 account   dedicated local user + autologon, so a console session exists
     6 tasks     register the glsplay task graph            (reboot into service)
 
@@ -76,12 +76,6 @@ function Invoke-Download {
   Invoke-WebRequest -Uri $Uri -OutFile $OutFile -UseBasicParsing
 }
 
-function Test-Reboot {
-  # Set by a driver install; continuing through one produces failures that
-  # point at the driver rather than at the pending rename.
-  Test-Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\PendingFileRenameOperations'
-}
-
 Log "=============================================================="
 Log "provision starting, stage=$(Get-Stage) host=$env:COMPUTERNAME"
 
@@ -90,12 +84,8 @@ Log "provision starting, stage=$(Get-Stage) host=$env:COMPUTERNAME"
 if ((Get-Stage) -eq 'tools') {
   Log 'STAGE 1: tools'
 
-  if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-    $msi = Join-Path $env:TEMP 'node.msi'
-    Invoke-Download 'https://nodejs.org/dist/v20.18.1/node-v20.18.1-x64.msi' $msi
-    Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /norestart" -Wait -NoNewWindow
-    Log 'node installed'
-  } else { Log 'node already present' }
+  # No Node here. The signaling broker and the web client run centrally, so
+  # this machine only ever runs one native binary and never needs a JS runtime.
 
   if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     $exe = Join-Path $env:TEMP 'git.exe'
@@ -236,31 +226,50 @@ if ((Get-Stage) -eq 'display') {
     else      { Log 'virtual display NOT created - DuplicateOutput will fail with 0x887A0002' 'ERROR' }
   }
 
-  Set-Stage 'build'
+  Set-Stage 'check'
 }
 
-# ---------------------------------------------------------------- 4. build --
+# ---------------------------------------------------------------- 4. check --
 
-if ((Get-Stage) -eq 'build') {
-  Log 'STAGE 4: build'
-  $env:PATH = [Environment]::GetEnvironmentVariable('PATH', 'Machine') + ';' +
-              [Environment]::GetEnvironmentVariable('PATH', 'User')
-  $npm = (Get-Command npm.cmd -ErrorAction SilentlyContinue).Source
-  if (-not $npm) { $npm = 'C:\Program Files\nodejs\npm.cmd' }
+if ((Get-Stage) -eq 'check') {
+  Log 'STAGE 4: verify the payload'
 
-  Push-Location $RepoRoot
-  & $npm install 2>&1 | ForEach-Object { Log "npm: $_" }
-  foreach ($w in @('@glsplay/protocol', '@glsplay/signaling', '@glsplay/web')) {
-    Log "building $w"
-    & $npm run build -w $w 2>&1 | ForEach-Object { Log "npm: $_" }
-  }
-  Pop-Location
-
+  # There is nothing to build here any more. The signaling broker and the web
+  # client run centrally - one deployment behind TLS serving every VM - so this
+  # machine needs neither Node nor a build step. That removed the two stages
+  # most likely to fail a bake: npm install needs the network, and next build
+  # will OOM on a small instance.
+  #
+  # The host binary is committed to the repo and links libwebrtc and the CRT
+  # statically, so the clone in stage 1 is the whole install.
   $exe = Join-Path $RepoRoot 'apps\host\build\bin\Release\glsplay-host.exe'
   if (Test-Path $exe) {
     Log "host binary present ($([math]::Round((Get-Item $exe).Length/1MB,1)) MB)"
   } else {
     Log "host binary MISSING at $exe - run-host.ps1 will exit 1" 'ERROR'
+  }
+
+  # The host dials the broker rather than being dialled, so a bad or
+  # unreachable signaling URL fails at connect time inside host.log, which is
+  # an unpleasant place to discover a typo. Check it here instead.
+  . (Join-Path $RepoRoot 'vm-scripts\session-config.ps1')
+  $cfg = Get-GlsplaySessionConfig -RepoRoot $RepoRoot
+  Log "signaling url: $($cfg.SignalingUrl)"
+  if ($cfg.SignalingUrl -match '^wss?://(localhost|127\.0\.0\.1)') {
+    Log 'signaling url still points at localhost, but nothing serves it on this VM.' 'ERROR'
+    Log 'Set instance metadata glsplay-signaling-url to the central broker.' 'ERROR'
+  } else {
+    # Probe the health endpoint. A failure here is informational - the broker
+    # may simply be behind a proxy that does not expose it - so it does not
+    # stop provisioning.
+    $probe = $cfg.SignalingUrl -replace '^ws', 'http'
+    try {
+      $health = Invoke-RestMethod "$probe/health" -TimeoutSec 10 -ErrorAction Stop
+      Log "broker reachable: status=$($health.status) rooms=$($health.rooms) peers=$($health.peers)"
+    } catch {
+      Log "broker health probe failed: $($_.Exception.Message)" 'WARN'
+      Log 'Not fatal - the WebSocket may still work if /health is not proxied.' 'WARN'
+    }
   }
 
   Set-Stage 'account'
@@ -294,6 +303,34 @@ if ((Get-Stage) -eq 'account') {
   & powershell -ExecutionPolicy Bypass -File (Join-Path $RepoRoot 'vm-scripts\setup-gcp-vm.ps1') `
       -AutoLogonUser $AutoLogonUser -AutoLogonPassword $plain 2>&1 |
     ForEach-Object { Log "setup-gcp-vm: $_" }
+
+  # setup-gcp-vm.ps1 writes DefaultPassword to the registry in clear text, which
+  # is how autologon has always worked and is readable by any administrator or
+  # by anyone who mounts the disk. Sysinternals Autologon stores it as an LSA
+  # secret instead - same behaviour, no plaintext - so re-apply it that way and
+  # delete the registry value. Best-effort: if the download fails the VM still
+  # logs on, just less well protected, and failing the bake over it would be a
+  # poor trade.
+  try {
+    $tool = Join-Path $env:TEMP 'Autologon64.exe'
+    if (-not (Test-Path $tool)) {
+      Invoke-Download 'https://live.sysinternals.com/Autologon64.exe' $tool
+    }
+    & $tool /accepteula $AutoLogonUser $env:COMPUTERNAME $plain 2>&1 |
+      ForEach-Object { Log "autologon: $_" }
+
+    $winlogon = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
+    $stillPlain = (Get-ItemProperty -Path $winlogon -Name 'DefaultPassword' -ErrorAction SilentlyContinue).DefaultPassword
+    if ($stillPlain) {
+      Remove-ItemProperty -Path $winlogon -Name 'DefaultPassword' -ErrorAction SilentlyContinue
+      Log 'password moved to the LSA store; cleared DefaultPassword from the registry'
+    } else {
+      Log 'DefaultPassword already absent from the registry'
+    }
+  } catch {
+    Log "LSA autologon step skipped: $($_.Exception.Message)" 'WARN'
+    Log 'Autologon still works, but the password remains in the registry in clear text.' 'WARN'
+  }
 
   $plain = $null
   Set-Stage 'tasks'

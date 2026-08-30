@@ -5,19 +5,19 @@
 .DESCRIPTION
   The one thing that must happen on every boot before anything else starts:
   pull this instance's session config out of GCE metadata and publish it where
-  the three processes can see it.
+  the host can see it.
 
     * machine environment variables - inherited by every task started after
-    * apps/web/.env                  - read by "next start" at runtime
+    * the repo-root .env            - the fallback beneath those
 
-  Then start the broker and the web app, in that order. They are registered
-  without their own triggers precisely so this script owns the ordering;
-  two "At startup" tasks have no defined sequence relative to each other, and
-  the web app reading a stale .env because it won the race is the kind of bug
-  that looks like a caching problem for a day.
+  Then check that the central broker answers, so an unreachable or mistyped
+  signaling URL shows up here rather than as a connect failure buried in
+  host.log twenty minutes later.
 
-  glsplay-host is NOT started here. It has to run in the interactive console
-  session, so it hangs off the autologon logon trigger instead.
+  Nothing is started here. The broker and the web client are one central
+  deployment that this VM dials out to; glsplay-host does that itself, from the
+  interactive console session, off the autologon logon trigger - a service in
+  session 0 has no desktop and could not capture at all.
 #>
 
 [CmdletBinding()]
@@ -65,42 +65,45 @@ foreach ($key in $machine.Keys) {
 }
 Log "machine env set: $($machine.Keys -join ', ')"
 
-# Both files, every boot. The broker's start script is
-# `node --env-file=../../.env`, and Node exits outright if that file is missing
-# - so a bake that deletes it (correctly, to avoid shipping a stale secret)
-# depends on this line to put it back before the task starts.
+# The root .env, every boot. The host reads it as a fallback beneath the
+# machine environment, and a bake correctly deletes it so no secret ships inside
+# the image - so writing it back here is what makes that deletion safe.
+#
+# apps\web\.env is no longer written: the web client is not served from this VM.
 $rootEnv = Write-GlsplayRootEnv -Config $cfg
 Log "wrote $rootEnv"
 
-$webEnv = Write-GlsplayWebEnv -Config $cfg
-Log "wrote $webEnv"
+# --- reachability of the central broker -------------------------------------
 
-# --- start the services, in order -------------------------------------------
-
-foreach ($task in @('glsplay-signaling', 'glsplay-web')) {
-  try {
-    Start-ScheduledTask -TaskName $task -ErrorAction Stop
-    Log "started task $task"
-  } catch {
-    Log "FAILED to start ${task}: $($_.Exception.Message)"
+# Nothing is started here any more. The broker and the web client are one
+# central deployment; this VM only dials out to them, and glsplay-host does that
+# itself from the console session at logon.
+#
+# What is still worth doing at boot is failing loudly if the broker cannot be
+# reached, because the alternative is discovering it inside host.log later.
+if ($cfg.SignalingUrl -match '^wss?://(localhost|127\.0\.0\.1)') {
+  Log 'FATAL: signaling url points at localhost, but nothing serves it on this VM'
+  Log '       set instance metadata glsplay-signaling-url to the central broker'
+} else {
+  $probe = $cfg.SignalingUrl -replace '^ws', 'http'
+  $deadline = (Get-Date).AddSeconds(60)
+  $healthy = $false
+  while ((Get-Date) -lt $deadline) {
+    try {
+      $health = Invoke-RestMethod "$probe/health" -TimeoutSec 5 -ErrorAction Stop
+      Log "broker reachable: status=$($health.status) rooms=$($health.rooms) peers=$($health.peers)"
+      $healthy = $true
+      break
+    } catch {
+      Start-Sleep -Seconds 5
+    }
   }
-  Start-Sleep -Seconds 2
-}
-
-# --- wait for the broker, so the host's logon trigger has something to dial --
-
-$deadline = (Get-Date).AddSeconds(90)
-$healthy = $false
-while ((Get-Date) -lt $deadline) {
-  try {
-    $health = Invoke-RestMethod 'http://localhost:8080/health' -TimeoutSec 3 -ErrorAction Stop
-    Log "broker healthy: status=$($health.status) rooms=$($health.rooms) peers=$($health.peers)"
-    $healthy = $true
-    break
-  } catch {
-    Start-Sleep -Seconds 3
+  # Not fatal. A proxy may route the WebSocket without exposing /health, which
+  # is a configuration choice rather than a fault - the host will still connect.
+  if (-not $healthy) {
+    Log "WARNING: no /health from $probe within 60s"
+    Log '         the WebSocket may still work; check host.log for the real answer'
   }
 }
-if (-not $healthy) { Log 'WARNING: broker did not answer /health within 90s' }
 
 Log 'boot complete'
