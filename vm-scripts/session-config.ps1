@@ -170,25 +170,4 @@ function Write-GlsplayRootEnv {
   return $path
 }
 
-# Writes the file next build / next start reads. Next.js loads .env from the
-# project directory, not the monorepo root, which is why this is a second file
-# rather than a symlink to the root one.
-function Write-GlsplayWebEnv {
-  [CmdletBinding()]
-  param([Parameter(Mandatory)]$Config)
-
-  $path = Join-Path $Config.RepoRoot 'apps\web\.env'
-  $lines = @(
-    "# Generated at boot by vm-scripts/boot.ps1 - edits are overwritten.",
-    "GLSPLAY_ROOM_SECRET=$($Config.Secret)",
-    "GLSPLAY_SIGNALING_URL=$($Config.PublicSignalingUrl)",
-    "GLSPLAY_ROOM_ID=$($Config.RoomId)",
-    "NEXT_PUBLIC_SIGNALING_URL=$($Config.PublicSignalingUrl)",
-    "NEXT_PUBLIC_ROOM_ID=$($Config.RoomId)",
-    "NEXT_PUBLIC_ROOM_SECRET=$($Config.Secret)"
-  )
-  Set-Content -Path $path -Value $lines -Encoding utf8
-  return $path
-}
-
 if ($Show) { Get-GlsplaySessionConfig | Format-List }

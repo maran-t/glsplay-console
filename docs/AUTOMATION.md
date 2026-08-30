@@ -19,12 +19,13 @@ the way to streaming, with no RDP session at any point:
 PROJECT=<your-project>
 ZONE=asia-south1-b
 SECRET=$(openssl rand -hex 32)
+BROKER=play.example.com            # your control-plane host
 
 gcloud compute instances create glsplay-1 --project=$PROJECT --zone=$ZONE \
   --machine-type=g2-standard-4 \
   --image-family=windows-2022 --image-project=windows-cloud \
   --boot-disk-size=200GB --enable-display-device \
-  --metadata="glsplay-secret=$SECRET,glsplay-room=poc" \
+  --metadata="glsplay-secret=$SECRET,glsplay-room=poc,glsplay-signaling-url=wss://$BROKER/ws" \
   --metadata-from-file="windows-startup-script-ps1=vm-scripts/provision.ps1"
 ```
 
@@ -40,23 +41,30 @@ gcloud compute instances get-serial-port-output glsplay-1 --zone=$ZONE \
   | grep glsplay-provision
 ```
 
-Stages: `tools` (Node, Git, clone) → `driver` (TCC → GRID/vWS, 2 reboots) →
-`display` (settings file, then MTT VDD via nefcon — no GUI wizard) → `build` →
+Stages: `tools` (Git, clone) → `driver` (TCC → GRID/vWS, 2 reboots) →
+`display` (settings file, then MTT VDD via nefcon — no GUI wizard) → `check` →
 `account` (dedicated local user + autologon) → `tasks` → `done`.
 
-When the log reaches `provisioning complete`, open `http://<external-ip>:3000`.
+When the log reaches `provisioning complete`, open the central web client.
 
-The firewall rules are per-network, not per-instance, so they are the one thing
-to create once per project:
+The GPU VM needs **no inbound TCP at all**. The broker and the web client are a
+separate always-on deployment, and the host dials out to it — so the only port
+that has to be reachable here is the media range:
 
 ```bash
-gcloud compute firewall-rules create glsplay-signaling --project=$PROJECT --allow tcp:8080 --source-ranges=0.0.0.0/0
-gcloud compute firewall-rules create glsplay-web       --project=$PROJECT --allow tcp:3000 --source-ranges=0.0.0.0/0
-gcloud compute firewall-rules create glsplay-media     --project=$PROJECT --allow udp:50000-50100 --source-ranges=0.0.0.0/0
+gcloud compute firewall-rules create glsplay-media --project=$PROJECT \
+  --allow udp:50000-50100 --source-ranges=0.0.0.0/0
 ```
+
+Ports 8080 and 3000 belong to the control-plane box, not to this one.
 
 The sections below describe what that script automates, and are what you want
 when a stage fails or when you are baking an image to skip the 30 minutes.
+
+> Prefer to watch each step, or finishing a stage the script stopped on?
+> **`docs/MANUAL-BAKE.md`** walks the same sequence by hand: manual for the
+> once-only half (tools, driver, display), then hands the per-instance half
+> (account, tasks) back to this script, because those two cannot be baked in.
 
 ---
 
@@ -68,8 +76,7 @@ Set on the instance at create time. Everything is optional except the secret.
 |---|---|---|
 | `glsplay-secret` | *(none — required)* | Room secret, presented by broker, host and browser |
 | `glsplay-room` | `poc` | Room id |
-| `glsplay-signaling-url` | `ws://localhost:8080` | Broker URL **the host dials**. Loopback while the broker runs on the VM |
-| `glsplay-public-signaling-url` | derived from the external IP | Broker URL **the browser dials**. Derived as `ws://<external-ip>:8080` when unset |
+| `glsplay-signaling-url` | `ws://localhost:8080` | Broker URL the host dials. **Must be set** — the default is a leftover from when the broker ran on the VM, and nothing serves it here now. Use `wss://<your-domain>/ws` |
 | `glsplay-output` | `1` | DXGI output to duplicate. `1` = Virtual Display Driver, `0` = L4 phantom head |
 | `glsplay-audio` | `off` | `on` enables WASAPI loopback (needs a virtual audio device) |
 | `glsplay-log-level` | `debug` | `debug` \| `info` \| `warn` \| `error` |
@@ -91,31 +98,26 @@ Registered once by `vdd\setup-headless.ps1`, then baked into the image.
 | Task | Trigger | Runs as | Action |
 |---|---|---|---|
 | `glsplay-boot` | At startup | SYSTEM | `vm-scripts\boot.ps1` |
-| `glsplay-signaling` | *(none)* | SYSTEM | `npm start -w @glsplay/signaling` |
-| `glsplay-web` | *(none)* | SYSTEM | `npm start -w @glsplay/web` |
 | `glsplay-host` | At logon + 45s | autologon user | `run-host.ps1` |
 | `glsplay-reclaim` | RDP disconnect | SYSTEM | `vdd\reclaim-console.ps1` |
 
 ```
 boot
  ├─ glsplay-boot (SYSTEM)
- │    ├─ metadata → machine env + apps\web\.env
- │    ├─ start glsplay-signaling, then glsplay-web
- │    └─ wait for /health, up to 90s          → boot.log
+ │    ├─ metadata → machine env + .env
+ │    └─ check the central broker answers    → boot.log
  │
  └─ autologon → console session
-      └─ glsplay-host (+45s, interactive)
+      └─ glsplay-host (+45s, interactive, restarts 3x on failure)
            ├─ vdd\set-vdd-res.ps1  pin 1920x1080@60
            └─ glsplay-host.exe --output 1     → host.log
+                └─ dials wss://<broker>/ws
 ```
 
-Two things changed here versus the hand-built VM, and both matter.
-
-**The service tasks lost their own triggers.** They are started by `glsplay-boot`,
-in order, so config is on disk before `next start` reads it. Two `At startup`
-tasks have no defined sequence relative to each other, and the web app coming up
-against a stale `.env` because it won the race is a bug that looks like a caching
-problem for a day.
+There used to be `glsplay-signaling` and `glsplay-web` tasks here, one copy of
+each per GPU VM. They are now a single central deployment behind TLS, so this
+machine runs one native binary and needs no JS runtime. `setup-headless.ps1`
+unregisters them if an older image still carries them.
 
 **The host runs off a logon trigger, not off RDP disconnect.** With autologon the
 console session exists from boot, so there is nothing to reclaim and no human in
@@ -134,16 +136,19 @@ has nothing to duplicate.
 image: a per-session room or secret would mean rebuilding the front end on every
 boot.
 
-So the browser now fetches `/api/session` at page load, and that route reads
-`process.env` per request (`dynamic = 'force-dynamic'`). `boot.ps1` writes
-`apps/web/.env` before starting the web task, `next start` reads it, and the
-bundle itself is built once at bake time. The `NEXT_PUBLIC_*` path still works as
-a fallback so `npm run dev` on a laptop needs nothing but a root `.env`.
+So the browser fetches `/api/session` at page load, and that route reads
+`process.env` per request (`dynamic = 'force-dynamic'`). Since the web client is
+now deployed centrally rather than once per VM, that environment comes from the
+control-plane box — no GPU VM is involved in serving it. The `NEXT_PUBLIC_*` path
+still works as a fallback so `npm run dev` on a laptop needs only a root `.env`.
 
-> The secret is served from an unauthenticated endpoint. That is exactly as
-> exposed as the inlined build-time value it replaces — no better, no worse.
-> Phase 2 replaces it with a short-lived per-session token minted by the control
-> plane after the user authenticates. Until then, keep the VM firewalled.
+> **The secret is served from an unauthenticated endpoint**, and that assessment
+> has changed. While the client was built per VM and served off a throwaway IP,
+> the value was inlined into the bundle anyway, so serving it exposed nothing
+> new. A permanent public domain moves the exposure from the bundle to the URL —
+> and the URL does not rotate when a VM does. Whoever has the secret can join a
+> live session as the client, and the host injects `SendInput`. See `TODO.md`;
+> the fix is per-session tokens.
 
 ---
 
@@ -155,17 +160,12 @@ On a VM brought up per `docs/DEPLOY-GCP-L4.md` §3–§6 and verified streaming:
 # Register the task graph. Reads the autologon user from the registry;
 # pass -User to override.
 powershell -ExecutionPolicy Bypass -File C:\glsplay\vdd\setup-headless.ps1
-
-# Build once, here, so instances don't build at boot.
-cd C:\glsplay
-npm ci
-npm run build -w @glsplay/protocol
-npm run build -w @glsplay/signaling
-npm run build -w @glsplay/web
 ```
 
-The host binary must already be at the path `run-host.ps1` checks — no script
-builds it, and a missing exe is a one-line `host.log` and nothing else:
+There is nothing to build. The broker and the web client are deployed centrally,
+so no JS is compiled or run on this machine. The host binary must already be at
+the path `run-host.ps1` checks — no script builds it, and a missing exe is a
+one-line `host.log` and nothing else:
 
 ```powershell
 Test-Path C:\glsplay\apps\host\build\bin\Release\glsplay-host.exe   # must be True
@@ -183,22 +183,17 @@ Then strip everything that names this one instance:
 powershell -ExecutionPolicy Bypass -File C:\glsplay\vm-scripts\bake-image.ps1
 ```
 
-It removes both `.env` files, the machine `GLSPLAY_ROOM_SECRET`, the autologon
-credentials from the registry, the local account and its profile, the scheduled
-tasks bound to that account, and every log — then rewinds `provision.ps1`'s
-stage marker to `account`.
+It removes the `.env`, the machine `GLSPLAY_ROOM_SECRET`, the autologon
+credentials — both the registry values and the LSA secret — the local account
+and its profile, the scheduled tasks bound to it, and every log. Then it rewinds
+`provision.ps1`'s stage marker to `account`.
 
-That rewind is the whole trick. The image carries the slow half — Node, Git, the
-repo, the WDDM driver, the virtual display device, the built workspaces — and
-the first boot of a new instance re-runs only the last two stages: create a
-local user with a freshly generated password, register the task graph, reboot
-into streaming. Two minutes rather than thirty, and **each instance gets its own
+That rewind is the whole trick. The image carries the slow half — Git, the repo
+including the host binary, the WDDM driver, the virtual display device — and the
+first boot of a new instance re-runs only the last two stages: create a local
+user with a freshly generated password, register the task graph, reboot into
+streaming. Two minutes rather than twenty-five, and **each instance gets its own
 credentials** instead of inheriting one password baked into the image.
-
-> Do not delete `C:\glsplay\.env` by hand and stop there. The broker starts with
-> `node --env-file=../../.env`, and Node exits outright if that file is missing —
-> not with a warning, with a dead process. `boot.ps1` rewrites it from metadata
-> on every boot, before starting the task, which is what makes deleting it safe.
 
 > `bake-image.ps1` deliberately does not run `GCESysprep`. Sysprep `/generalize`
 > tears down root-enumerated devices, and `MttVDD` is one — the virtual display
@@ -217,12 +212,13 @@ gcloud compute images create glsplay-$(date +%Y%m%d) \
 
 ```bash
 SECRET=$(openssl rand -hex 32)
+BROKER=play.example.com            # your control-plane host
 
 gcloud compute instances create glsplay-session-1 \
   --zone=$ZONE --machine-type=g2-standard-4 \
   --image-family=glsplay --image-project=$PROJECT \
   --enable-display-device \
-  --metadata="glsplay-secret=$SECRET,glsplay-room=session-1" \
+  --metadata="glsplay-secret=$SECRET,glsplay-room=session-1,glsplay-signaling-url=wss://$BROKER/ws" \
   --metadata-from-file="windows-startup-script-ps1=vm-scripts/provision.ps1"
 ```
 
@@ -232,9 +228,9 @@ account, registers the task graph and reboots; from the second boot on it sees
 stage `done` and just logs the task states.
 
 So: **first boot from the image about two minutes, every boot after that about
-ninety seconds.** Then the instance resolves its metadata, starts the broker and
-web app, autologons, and the host begins capturing 45 seconds later. Point a
-browser at `http://<external-ip>:3000`.
+ninety seconds.** The instance resolves its metadata, autologons, and the host
+begins capturing 45 seconds later, dialling out to the central broker. Open the
+web client at your own domain — the GPU VM serves no web page of its own.
 
 Verify from the guest without disturbing the stream — RDP re-steals the display,
 so read the logs and disconnect again:
