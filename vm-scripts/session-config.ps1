@@ -144,6 +144,32 @@ function Get-GlsplaySessionConfig {
   }
 }
 
+# Writes the file the signaling broker reads. Its start script is
+# `node --env-file=../../.env`, and Node EXITS if that file is absent - so this
+# must be written on every boot, not merely kept in sync. Writing it also
+# removes any dependence on machine-environment propagation: a scheduled task
+# gets its environment block when the process is created, so a variable set
+# moments earlier by boot.ps1 is not reliably visible to it, whereas a file on
+# disk is. Process env still wins over --env-file, so both agreeing is safe.
+function Write-GlsplayRootEnv {
+  [CmdletBinding()]
+  param([Parameter(Mandatory)]$Config)
+
+  $path = Join-Path $Config.RepoRoot '.env'
+  $lines = @(
+    "# Generated at boot by vm-scripts/boot.ps1 - edits are overwritten.",
+    "GLSPLAY_SIGNALING_PORT=8080",
+    "GLSPLAY_SIGNALING_HOST=0.0.0.0",
+    "GLSPLAY_ROOM_SECRET=$($Config.Secret)",
+    "GLSPLAY_ROOM_ID=$($Config.RoomId)",
+    "NEXT_PUBLIC_SIGNALING_URL=$($Config.PublicSignalingUrl)",
+    "NEXT_PUBLIC_ROOM_ID=$($Config.RoomId)",
+    "NEXT_PUBLIC_ROOM_SECRET=$($Config.Secret)"
+  )
+  Set-Content -Path $path -Value $lines -Encoding utf8
+  return $path
+}
+
 # Writes the file next build / next start reads. Next.js loads .env from the
 # project directory, not the monorepo root, which is why this is a second file
 # rather than a symlink to the root one.

@@ -65,6 +65,13 @@ foreach ($key in $machine.Keys) {
 }
 Log "machine env set: $($machine.Keys -join ', ')"
 
+# Both files, every boot. The broker's start script is
+# `node --env-file=../../.env`, and Node exits outright if that file is missing
+# - so a bake that deletes it (correctly, to avoid shipping a stale secret)
+# depends on this line to put it back before the task starts.
+$rootEnv = Write-GlsplayRootEnv -Config $cfg
+Log "wrote $rootEnv"
+
 $webEnv = Write-GlsplayWebEnv -Config $cfg
 Log "wrote $webEnv"
 
