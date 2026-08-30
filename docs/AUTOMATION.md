@@ -10,6 +10,56 @@ editing a file on a running VM to make it stream, that is a bug in this layer.
 
 ---
 
+## 0. One command
+
+`vm-scripts/provision.ps1` takes a bare Windows Server 2022 + L4 instance all
+the way to streaming, with no RDP session at any point:
+
+```bash
+PROJECT=<your-project>
+ZONE=asia-south1-b
+SECRET=$(openssl rand -hex 32)
+
+gcloud compute instances create glsplay-1 --project=$PROJECT --zone=$ZONE \
+  --machine-type=g2-standard-4 \
+  --image-family=windows-2022 --image-project=windows-cloud \
+  --boot-disk-size=200GB --enable-display-device \
+  --metadata="glsplay-secret=$SECRET,glsplay-room=poc" \
+  --metadata-from-file="windows-startup-script-ps1=vm-scripts/provision.ps1"
+```
+
+Then wait. Roughly 25–35 minutes, most of it the NVIDIA driver.
+
+GCE runs a Windows startup script on **every** boot, which is what makes this
+resumable at no cost: the script keeps a stage in `C:\glsplay-provision\state.txt`,
+and the driver's two reboots simply re-enter it at the next stage. Watch a
+machine you have never logged into:
+
+```bash
+gcloud compute instances get-serial-port-output glsplay-1 --zone=$ZONE \
+  | grep glsplay-provision
+```
+
+Stages: `tools` (Node, Git, clone) → `driver` (TCC → GRID/vWS, 2 reboots) →
+`display` (settings file, then MTT VDD via nefcon — no GUI wizard) → `build` →
+`account` (dedicated local user + autologon) → `tasks` → `done`.
+
+When the log reaches `provisioning complete`, open `http://<external-ip>:3000`.
+
+The firewall rules are per-network, not per-instance, so they are the one thing
+to create once per project:
+
+```bash
+gcloud compute firewall-rules create glsplay-signaling --project=$PROJECT --allow tcp:8080 --source-ranges=0.0.0.0/0
+gcloud compute firewall-rules create glsplay-web       --project=$PROJECT --allow tcp:3000 --source-ranges=0.0.0.0/0
+gcloud compute firewall-rules create glsplay-media     --project=$PROJECT --allow udp:50000-50100 --source-ranges=0.0.0.0/0
+```
+
+The sections below describe what that script automates, and are what you want
+when a stage fails or when you are baking an image to skip the 30 minutes.
+
+---
+
 ## 1. Metadata keys
 
 Set on the instance at create time. Everything is optional except the secret.
