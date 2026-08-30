@@ -177,15 +177,35 @@ is usually better: the exe links libwebrtc and the CRT statically and resolves
 beside it and the image carries no toolchain, no `third_party/`, and no reason to
 keep MSVC installed on a machine whose job is to stream.
 
-Then remove anything instance-specific before the snapshot — a stale secret in a
-baked `.env` silently wins over metadata on every instance that boots from the
-image:
+Then strip everything that names this one instance:
 
 ```powershell
-Remove-Item C:\glsplay\.env, C:\glsplay\apps\web\.env -Force -ErrorAction SilentlyContinue
-Remove-Item C:\glsplay\*.log, C:\glsplay\*.log.* -Force -ErrorAction SilentlyContinue
-[Environment]::SetEnvironmentVariable('GLSPLAY_ROOM_SECRET', $null, 'Machine')
+powershell -ExecutionPolicy Bypass -File C:\glsplay\vm-scripts\bake-image.ps1
 ```
+
+It removes both `.env` files, the machine `GLSPLAY_ROOM_SECRET`, the autologon
+credentials from the registry, the local account and its profile, the scheduled
+tasks bound to that account, and every log — then rewinds `provision.ps1`'s
+stage marker to `account`.
+
+That rewind is the whole trick. The image carries the slow half — Node, Git, the
+repo, the WDDM driver, the virtual display device, the built workspaces — and
+the first boot of a new instance re-runs only the last two stages: create a
+local user with a freshly generated password, register the task graph, reboot
+into streaming. Two minutes rather than thirty, and **each instance gets its own
+credentials** instead of inheriting one password baked into the image.
+
+> Do not delete `C:\glsplay\.env` by hand and stop there. The broker starts with
+> `node --env-file=../../.env`, and Node exits outright if that file is missing —
+> not with a warning, with a dead process. `boot.ps1` rewrites it from metadata
+> on every boot, before starting the task, which is what makes deleting it safe.
+
+> `bake-image.ps1` deliberately does not run `GCESysprep`. Sysprep `/generalize`
+> tears down root-enumerated devices, and `MttVDD` is one — the virtual display
+> would not survive, which is the most tedious thing in the image to rebuild.
+> The cost is a shared machine SID, which matters for Active Directory and some
+> licensing and not at all for disposable single-tenant gaming VMs. If you do
+> need sysprep, pass `-ResumeStage display` so the VDD is recreated on first boot.
 
 ```bash
 gcloud compute instances stop $INSTANCE --zone=$ZONE
@@ -201,10 +221,18 @@ SECRET=$(openssl rand -hex 32)
 gcloud compute instances create glsplay-session-1 \
   --zone=$ZONE --machine-type=g2-standard-4 \
   --image-family=glsplay --image-project=$PROJECT \
-  --metadata=glsplay-secret=$SECRET,glsplay-room=session-1
+  --enable-display-device \
+  --metadata="glsplay-secret=$SECRET,glsplay-room=session-1" \
+  --metadata-from-file="windows-startup-script-ps1=vm-scripts/provision.ps1"
 ```
 
-Nothing else. The instance boots, resolves its metadata, starts the broker and
+The startup script is still required against a baked image — it is what runs the
+two stages `bake-image.ps1` rewound to. On first boot it creates the local
+account, registers the task graph and reboots; from the second boot on it sees
+stage `done` and just logs the task states.
+
+So: **first boot from the image about two minutes, every boot after that about
+ninety seconds.** Then the instance resolves its metadata, starts the broker and
 web app, autologons, and the host begins capturing 45 seconds later. Point a
 browser at `http://<external-ip>:3000`.
 
