@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { StreamPlayer } from '@/components/StreamPlayer';
 import { StatsOverlay } from '@/components/StatsOverlay';
 import { useInputCapture } from '@/hooks/useInputCapture';
@@ -95,11 +95,19 @@ export default function Page() {
   const { state, stream, peerConnection, sendInput, sendControl } = useWebRTC(config);
   const stats = useStreamStats(peerConnection);
 
+  const captureSize = useMemo(
+    () =>
+      state.hello ? { w: state.hello.display.width, h: state.hello.display.height } : null,
+    [state.hello],
+  );
+
   const input = useInputCapture({
     target: videoRef,
     sendInput,
     sendControl,
     enabled: state.connection === 'connected',
+    captureSize,
+    hostCursor: state.cursor,
   });
 
   // F1 toggles the HUD. Handled here rather than in useInputCapture because it
@@ -160,6 +168,10 @@ export default function Page() {
         signalingUrl={config.signalingUrl}
         hostPresent={state.hostPresent}
         pointerLocked={input.pointerLocked}
+        mode={input.mode}
+        cursor={state.cursor}
+        captureSize={captureSize}
+        predictedCursor={input.predictedCursor}
         error={state.error}
       />
 

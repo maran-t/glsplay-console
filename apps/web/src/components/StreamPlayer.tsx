@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import type { SignalingState } from '@/lib/signaling';
+import type { CursorInfo } from '@/hooks/useWebRTC';
 
 export interface StreamPlayerProps {
   stream: MediaStream | null;
@@ -13,6 +14,14 @@ export interface StreamPlayerProps {
   signalingUrl: string;
   hostPresent: boolean;
   pointerLocked: boolean;
+  /** 'relative' = Pointer-Locked mouselook; 'absolute' = desktop pointer. */
+  mode: 'relative' | 'absolute';
+  /** Remote pointer, drawn client-side. Never baked into the video. */
+  cursor: CursorInfo | null;
+  /** Host capture size, to place the pointer inside the letterboxed video. */
+  captureSize: { w: number; h: number } | null;
+  /** Predicted pointer position (host pixels) for the relative-mode sprite. */
+  predictedCursor: React.MutableRefObject<{ x: number; y: number }>;
   error: string | null;
 }
 
@@ -47,7 +56,15 @@ function Stage({
  *
  * Two browser policies shape this component. Autoplay with audio requires a
  * user gesture, so the first frame sits behind an explicit start control.
- * Pointer Lock also requires a gesture, and the same click satisfies both.
+ * Pointer Lock also requires a gesture, and it is deferred to an explicit
+ * "capture mouse" action so desktop use gets a real, zero-latency cursor.
+ *
+ * The cursor is never in the video (RDP / Parsec / Moonlight model). Two ways
+ * to draw it locally:
+ *  - absolute mode: as the video's CSS cursor, so the browser renders it at the
+ *    true mouse position with zero latency, skinned to the host's shape;
+ *  - relative mode: as an <img> overlay at the locally dead-reckoned position,
+ *    since Pointer Lock hides the real one.
  */
 export function StreamPlayer({
   stream,
@@ -58,11 +75,20 @@ export function StreamPlayer({
   signalingUrl,
   hostPresent,
   pointerLocked,
+  mode,
+  cursor,
+  captureSize,
+  predictedCursor,
   error,
 }: StreamPlayerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const cursorImgRef = useRef<HTMLImageElement>(null);
   const [started, setStarted] = useState(false);
   const [playbackError, setPlaybackError] = useState<string | null>(null);
+
+  // Cursor shape as a data URL. It is already fully in memory (no network
+  // fetch), so it is used directly.
+  const cursorUrl = cursor?.url ?? null;
 
   useEffect(() => {
     const video = videoRef.current;
@@ -73,15 +99,59 @@ export function StreamPlayer({
     };
   }, [stream, videoRef]);
 
-  // The host now blends the pointer straight into the video, so there is no
-  // client-side cursor to draw. Just hide the local one while Pointer-Locked
-  // (the baked one is authoritative); show a normal arrow otherwise so the
-  // "click to start" affordance is reachable.
+  // Skin the browser's own cursor in absolute mode; hide it in relative mode
+  // (the game draws its reticle, or we draw the sprite overlay below).
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
-    video.style.cursor = pointerLocked ? 'none' : '';
-  }, [pointerLocked, videoRef]);
+    if (!started) {
+      video.style.cursor = '';
+      return;
+    }
+    if (mode === 'relative' || (cursor && !cursor.visible)) {
+      video.style.cursor = 'none';
+    } else if (cursorUrl) {
+      video.style.cursor = `url(${cursorUrl}) ${cursor?.hotspotX ?? 0} ${cursor?.hotspotY ?? 0}, auto`;
+    } else {
+      video.style.cursor = '';
+    }
+  }, [started, mode, cursor, cursorUrl, videoRef]);
+
+  // Relative-mode sprite: position it every frame from the predicted position,
+  // mapped into the video's letterboxed content box. Imperative rather than
+  // React state so it tracks the mouse at display refresh, not render cadence.
+  const showSprite = mode === 'relative' && !!cursor?.visible && !!cursorUrl && !!captureSize;
+  useEffect(() => {
+    if (!showSprite) return;
+    const video = videoRef.current;
+    if (!video || !captureSize) return;
+    let raf = 0;
+    const tick = () => {
+      raf = requestAnimationFrame(tick);
+      const img = cursorImgRef.current;
+      if (!img) return;
+      const vw = video.clientWidth;
+      const vh = video.clientHeight;
+      if (!vw || !vh) return;
+      const hostAr = captureSize.w / captureSize.h;
+      let cw = vw;
+      let ch = vw / hostAr;
+      if (ch > vh) {
+        ch = vh;
+        cw = ch * hostAr;
+      }
+      const ox = (vw - cw) / 2;
+      const oy = (vh - ch) / 2;
+      const sx = cw / captureSize.w;
+      const sy = ch / captureSize.h;
+      const p = predictedCursor.current;
+      img.style.transform = `translate(${ox + p.x * sx}px, ${oy + p.y * sy}px)`;
+      img.style.width = `${(cursor?.width || 32) * sx}px`;
+      img.style.height = `${(cursor?.height || 32) * sy}px`;
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [showSprite, captureSize, cursor?.width, cursor?.height, predictedCursor, videoRef]);
 
   const start = async () => {
     const video = videoRef.current;
@@ -94,7 +164,6 @@ export function StreamPlayer({
       await video.play();
       setStarted(true);
       setPlaybackError(null);
-      await video.requestPointerLock();
     } catch (err) {
       setPlaybackError(err instanceof Error ? err.message : String(err));
     }
@@ -174,6 +243,19 @@ export function StreamPlayer({
         tabIndex={-1}
       />
 
+      {showSprite && cursorUrl && (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          ref={cursorImgRef}
+          src={cursorUrl}
+          alt=""
+          draggable={false}
+          className="pointer-events-none absolute left-0 top-0 z-50 select-none"
+          // Parked offscreen until the first rAF tick positions it.
+          style={{ willChange: 'transform', transform: 'translate(-9999px, -9999px)' }}
+        />
+      )}
+
       {showOverlay && headline && (
         <div className="absolute inset-0 flex items-center justify-center">
           <div className="flex w-[340px] flex-col gap-4 rounded-lg border border-edge bg-panel/92 px-6 py-5">
@@ -208,10 +290,11 @@ export function StreamPlayer({
             Click to start
           </div>
           <div className="max-w-xs text-center text-xs leading-relaxed text-muted">
-            Starts audio and captures your mouse and keyboard.
-            <br />
-            Press <kbd className="rounded border border-edge px-1 font-mono">Esc</kbd> to release
-            them.
+            Starts audio and forwards your mouse and keyboard. Use the pointer
+            like a normal desktop; press <kbd className="rounded border border-edge px-1 font-mono">
+            Capture mouse
+            </kbd>{' '}
+            for mouselook games.
           </div>
           {playbackError && <div className="font-mono text-xs text-bad">{playbackError}</div>}
         </button>
@@ -223,7 +306,7 @@ export function StreamPlayer({
           onClick={() => void videoRef.current?.requestPointerLock()}
           className="absolute bottom-4 left-1/2 -translate-x-1/2 rounded-md border border-edge bg-panel/90 px-4 py-2 font-mono text-xs text-muted transition-colors hover:text-ink"
         >
-          Click to recapture input
+          Capture mouse (for games) · Esc to release
         </button>
       )}
     </div>
