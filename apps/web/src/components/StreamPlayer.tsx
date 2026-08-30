@@ -145,7 +145,11 @@ export function StreamPlayer({
       const sx = cw / captureSize.w;
       const sy = ch / captureSize.h;
       const p = predictedCursor.current;
-      img.style.transform = `translate(${ox + p.x * sx}px, ${oy + p.y * sy}px)`;
+      // Keep the sprite inside the rendered video box even if the locally
+      // integrated position has drifted past an edge before the next settle.
+      const px = Math.min(ox + cw, Math.max(ox, ox + p.x * sx));
+      const py = Math.min(oy + ch, Math.max(oy, oy + p.y * sy));
+      img.style.transform = `translate(${px}px, ${py}px)`;
       img.style.width = `${(cursor?.width || 32) * sx}px`;
       img.style.height = `${(cursor?.height || 32) * sy}px`;
     };

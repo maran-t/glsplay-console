@@ -53,12 +53,15 @@ const DOM_DELTA_PAGE = 2;
 const MAX_MOUSE_DELTA = 1200;
 
 /**
- * Once the predicted pointer and the host's reported position diverge by more
- * than this, snap rather than ease - the host warped it (a game recentred, the
- * pointer hit a clamp edge, packets were missed). Below it, ease so accumulated
- * rounding never shows as a jump.
+ * How long after the last relative move the pointer is considered "at rest".
+ * While moving, the locally integrated position is authoritative and shown as
+ * is - it tracks the hand exactly and needs no correction. Once the mouse has
+ * been still this long, the host's reported position (which lags by the
+ * network) has caught up and is copied verbatim, silently absorbing any drift
+ * from a clamp edge or a game warp. No distance thresholds, nothing tied to
+ * resolution - just "trust local while moving, trust host once stopped".
  */
-const PREDICT_SNAP_PX = 80;
+const CURSOR_SETTLE_MS = 120;
 
 /**
  * Captures mouse, keyboard and gamepad, and packs them onto the input
@@ -111,8 +114,10 @@ export function useInputCapture(opts: InputCaptureOptions): InputCaptureState {
   /** Props mirrored into refs so the event handlers don't need re-binding. */
   const captureSizeRef = useRef(captureSize);
   const hostCursorRef = useRef(hostCursor);
-  /** Predicted pointer position, host capture pixels. */
+  /** Locally integrated pointer position, host capture pixels. */
   const predictedCursor = useRef({ x: 0, y: 0 });
+  /** performance.now() of the last relative move, for the settle check. */
+  const lastMoveAtRef = useRef(0);
 
   useEffect(() => {
     captureSizeRef.current = captureSize;
@@ -214,14 +219,12 @@ export function useInputCapture(opts: InputCaptureOptions): InputCaptureState {
       if (locked) {
         swallowNextMove.current = true;
         activeRef.current = true;
-        // Seed the predicted pointer so it doesn't start from the origin.
+        // Start from wherever the host says the pointer is. If it hasn't
+        // reported yet, start at the origin; the first settle copies the real
+        // position in within CURSOR_SETTLE_MS.
         const hc = hostCursorRef.current;
-        const cap = captureSizeRef.current;
-        if (hc && hc.visible) {
-          predictedCursor.current = { x: hc.x, y: hc.y };
-        } else if (cap) {
-          predictedCursor.current = { x: cap.w / 2, y: cap.h / 2 };
-        }
+        predictedCursor.current = hc ? { x: hc.x, y: hc.y } : { x: 0, y: 0 };
+        lastMoveAtRef.current = 0;
       }
       sendControl({ type: 'set-pointer-mode', mode: locked ? 'relative' : 'absolute' });
       // Leaving lock mid-keypress would otherwise latch that key down on the
@@ -233,19 +236,17 @@ export function useInputCapture(opts: InputCaptureOptions): InputCaptureState {
     return () => document.removeEventListener('pointerlockchange', onPointerLockChange);
   }, [enabled, releaseHeldKeys, sendControl, target]);
 
-  // ---- reconcile the predicted pointer toward the host's -----------------
+  // ---- re-sync to the host position once the pointer is at rest ----------
   useEffect(() => {
     if (!hostCursor) return;
-    // Absolute mode draws the browser's own cursor, so prediction is unused.
+    // Absolute mode draws the browser's own cursor, so this is unused.
     if (document.pointerLockElement !== target.current) return;
-    const p = predictedCursor.current;
-    const dx = hostCursor.x - p.x;
-    const dy = hostCursor.y - p.y;
-    if (Math.hypot(dx, dy) > PREDICT_SNAP_PX) {
-      predictedCursor.current = { x: hostCursor.x, y: hostCursor.y };
-    } else {
-      predictedCursor.current = { x: p.x + dx * 0.15, y: p.y + dy * 0.15 };
-    }
+    // While the mouse is moving, the locally integrated position is shown as
+    // is - correcting toward the network-delayed host position mid-motion is
+    // what makes the pointer stutter and jump. Only once it has settled do we
+    // copy the host position in, absorbing any drift where it can't be seen.
+    if (performance.now() - lastMoveAtRef.current < CURSOR_SETTLE_MS) return;
+    predictedCursor.current = { x: hostCursor.x, y: hostCursor.y };
   }, [hostCursor, target]);
 
   // ---- mouse -----------------------------------------------------------
@@ -296,15 +297,14 @@ export function useInputCapture(opts: InputCaptureOptions): InputCaptureState {
         if (dx === 0 && dy === 0) return;
         dx = Math.max(-MAX_MOUSE_DELTA, Math.min(MAX_MOUSE_DELTA, dx));
         dy = Math.max(-MAX_MOUSE_DELTA, Math.min(MAX_MOUSE_DELTA, dy));
-        // Dead-reckon the local cursor so it tracks the hand with no round trip.
-        // The host injects these deltas 1:1 (acceleration is disabled there), so
-        // accumulating them here matches where the host pointer actually goes.
+        // Integrate the delta locally so the cursor tracks the hand with no
+        // round trip. The host injects these same deltas 1:1 (acceleration is
+        // disabled there), so this stays in step with the real host pointer;
+        // any drift is corrected on settle. No clamp here - the host bounds the
+        // real pointer, and StreamPlayer keeps the sprite inside the video.
         const p = predictedCursor.current;
-        const cap = captureSizeRef.current;
-        predictedCursor.current = {
-          x: cap ? Math.min(cap.w, Math.max(0, p.x + dx)) : p.x + dx,
-          y: cap ? Math.min(cap.h, Math.max(0, p.y + dy)) : p.y + dy,
-        };
+        predictedCursor.current = { x: p.x + dx, y: p.y + dy };
+        lastMoveAtRef.current = performance.now();
         const encoder = encoderRef.current;
         if (!encoder.mouseMoveRelative(dx, dy, now())) {
           flush();
