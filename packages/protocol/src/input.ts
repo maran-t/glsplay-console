@@ -232,7 +232,11 @@ export class InputEncoder {
     return true;
   }
 
-  /** x and y are normalised to 0..32767 across the remote desktop. */
+  /**
+   * x and y are normalised to 0..32767 within the captured output - the
+   * client's pointer position inside the letterboxed video, not the whole
+   * remote desktop. The host maps this onto the monitor it is streaming.
+   */
   mouseMoveAbsolute(x: number, y: number, t: number): boolean {
     const p = this.header(InputType.MouseMoveAbsolute, 0, t);
     if (p < 0) return false;
