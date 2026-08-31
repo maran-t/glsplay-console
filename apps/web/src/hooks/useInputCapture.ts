@@ -118,6 +118,13 @@ export function useInputCapture(opts: InputCaptureOptions): InputCaptureState {
   const predictedCursor = useRef({ x: 0, y: 0 });
   /** performance.now() of the last relative move, for the settle check. */
   const lastMoveAtRef = useRef(0);
+  /** Last pointer position over the video in CSS pixels, for desktop-mode
+   *  delta derivation. Null until the pointer enters, so re-entering after a
+   *  trip outside the element seeds rather than injects a jump. */
+  const lastDesktopPos = useRef<{ x: number; y: number } | null>(null);
+  /** Sub-pixel remainder carried between desktop-mode moves. Without it, slow
+   *  motion truncates to zero on every event and the pointer never starts. */
+  const desktopRemainder = useRef({ x: 0, y: 0 });
 
   useEffect(() => {
     captureSizeRef.current = captureSize;
@@ -183,31 +190,25 @@ export function useInputCapture(opts: InputCaptureOptions): InputCaptureState {
   }, [flush, now, scheduleFlush]);
 
   /**
-   * Maps a mouse event to a 0..1 position within the captured output, undoing
-   * the video's object-contain letterbox. Null while the size isn't known yet.
+   * Rendered size of the video's content box - the letterboxed area that
+   * actually shows host pixels, excluding the bars. Null while the size isn't
+   * known yet.
    */
-  const toNormalised = useCallback(
-    (ev: MouseEvent): { nx: number; ny: number } | null => {
-      const el = target.current;
-      const cap = captureSizeRef.current;
-      if (!el || !cap || cap.w <= 0 || cap.h <= 0) return null;
-      const rect = el.getBoundingClientRect();
-      if (rect.width === 0 || rect.height === 0) return null;
-      const hostAr = cap.w / cap.h;
-      let cw = rect.width;
-      let ch = cw / hostAr;
-      if (ch > rect.height) {
-        ch = rect.height;
-        cw = ch * hostAr;
-      }
-      const ox = (rect.width - cw) / 2;
-      const oy = (rect.height - ch) / 2;
-      const nx = Math.min(1, Math.max(0, (ev.clientX - rect.left - ox) / cw));
-      const ny = Math.min(1, Math.max(0, (ev.clientY - rect.top - oy) / ch));
-      return { nx, ny };
-    },
-    [target],
-  );
+  const contentSize = useCallback((): { cw: number; ch: number } | null => {
+    const el = target.current;
+    const cap = captureSizeRef.current;
+    if (!el || !cap || cap.w <= 0 || cap.h <= 0) return null;
+    const rect = el.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return null;
+    const hostAr = cap.w / cap.h;
+    let cw = rect.width;
+    let ch = cw / hostAr;
+    if (ch > rect.height) {
+      ch = rect.height;
+      cw = ch * hostAr;
+    }
+    return { cw, ch };
+  }, [target]);
 
   // ---- pointer lock ------------------------------------------------------
   useEffect(() => {
@@ -216,6 +217,10 @@ export function useInputCapture(opts: InputCaptureOptions): InputCaptureState {
     const onPointerLockChange = () => {
       const locked = document.pointerLockElement === target.current;
       setPointerLocked(locked);
+      // Either direction leaves the desktop-mode origin stale - the pointer is
+      // warped by the lock transition itself.
+      lastDesktopPos.current = null;
+      desktopRemainder.current = { x: 0, y: 0 };
       if (locked) {
         swallowNextMove.current = true;
         activeRef.current = true;
@@ -266,16 +271,45 @@ export function useInputCapture(opts: InputCaptureOptions): InputCaptureState {
       }
     };
 
-    /** Absolute-mode position update from a mouse event. */
-    const sendAbsoluteFrom = (ev: MouseEvent) => {
-      const nrm = toNormalised(ev);
-      if (!nrm) return;
-      const x = Math.round(nrm.nx * 32767);
-      const y = Math.round(nrm.ny * 32767);
+    /**
+     * Desktop-mode (not Pointer-Locked) motion, sent as a delta rather than an
+     * absolute position.
+     *
+     * The obvious encoding - normalise the position over the captured monitor
+     * and send mouseMoveAbsolute - is wrong against this host. It injects with
+     * MOUSEEVENTF_VIRTUALDESK, whose 0..65535 range spans the whole virtual
+     * desktop; the VM's captured display is only part of that (the L4's
+     * phantom head is the rest), so the pointer lands scaled by
+     * virtualWidth/captureWidth and offset by the capture origin - it runs
+     * ahead of the local cursor and the hover highlight sits somewhere else.
+     *
+     * Deltas take the host's relative path instead, which injects 1:1 and
+     * clamps to the captured monitor. Scaling rendered CSS pixels into capture
+     * pixels means a sweep across the video covers exactly the same fraction
+     * of the host's screen however large the video is drawn, and both pointers
+     * reach their left/right limits together, so they cannot drift apart.
+     */
+    const sendDesktopMotion = (ev: MouseEvent) => {
+      const cap = captureSizeRef.current;
+      const box = contentSize();
+      const prev = lastDesktopPos.current;
+      lastDesktopPos.current = { x: ev.clientX, y: ev.clientY };
+      // The first sample after entering the video only seeds the origin -
+      // treating it as motion would inject the jump from wherever the pointer
+      // was last seen.
+      if (!cap || !box || !prev) return;
+      const rx = (ev.clientX - prev.x) * (cap.w / box.cw) + desktopRemainder.current.x;
+      const ry = (ev.clientY - prev.y) * (cap.h / box.ch) + desktopRemainder.current.y;
+      let dx = Math.trunc(rx);
+      let dy = Math.trunc(ry);
+      desktopRemainder.current = { x: rx - dx, y: ry - dy };
+      if (dx === 0 && dy === 0) return;
+      dx = Math.max(-MAX_MOUSE_DELTA, Math.min(MAX_MOUSE_DELTA, dx));
+      dy = Math.max(-MAX_MOUSE_DELTA, Math.min(MAX_MOUSE_DELTA, dy));
       const encoder = encoderRef.current;
-      if (!encoder.mouseMoveAbsolute(x, y, now())) {
+      if (!encoder.mouseMoveRelative(dx, dy, now())) {
         flush();
-        encoder.mouseMoveAbsolute(x, y, now());
+        encoder.mouseMoveRelative(dx, dy, now());
       }
       scheduleFlush();
     };
@@ -300,10 +334,16 @@ export function useInputCapture(opts: InputCaptureOptions): InputCaptureState {
         // Integrate the delta locally so the cursor tracks the hand with no
         // round trip. The host injects these same deltas 1:1 (acceleration is
         // disabled there), so this stays in step with the real host pointer;
-        // any drift is corrected on settle. No clamp here - the host bounds the
-        // real pointer, and StreamPlayer keeps the sprite inside the video.
+        // any drift is corrected on settle. Clamped to the capture because the
+        // host clamps the real pointer the same way - letting this run free
+        // past an edge banks up motion that has to be undone before the sprite
+        // moves again, which reads as the pointer sticking.
         const p = predictedCursor.current;
-        predictedCursor.current = { x: p.x + dx, y: p.y + dy };
+        const cap = captureSizeRef.current;
+        predictedCursor.current = {
+          x: cap ? Math.min(cap.w, Math.max(0, p.x + dx)) : p.x + dx,
+          y: cap ? Math.min(cap.h, Math.max(0, p.y + dy)) : p.y + dy,
+        };
         lastMoveAtRef.current = performance.now();
         const encoder = encoderRef.current;
         if (!encoder.mouseMoveRelative(dx, dy, now())) {
@@ -313,9 +353,14 @@ export function useInputCapture(opts: InputCaptureOptions): InputCaptureState {
         scheduleFlush();
         return;
       }
-      // Absolute / desktop mode: the browser is showing the real cursor; just
-      // tell the host where it is.
-      sendAbsoluteFrom(ev);
+      sendDesktopMotion(ev);
+    };
+
+    // Leaving the element drops the origin, so coming back in seeds afresh
+    // instead of injecting the whole trip across the page as one delta.
+    const onMouseLeave = () => {
+      lastDesktopPos.current = null;
+      desktopRemainder.current = { x: 0, y: 0 };
     };
 
     const onMouseDown = (ev: MouseEvent) => {
@@ -323,9 +368,9 @@ export function useInputCapture(opts: InputCaptureOptions): InputCaptureState {
       const button = buttonFor(ev.button);
       if (button === null) return;
       ev.preventDefault();
-      // In absolute mode a click without a preceding move would land at a stale
-      // position; pin the pointer first.
-      if (document.pointerLockElement !== element) sendAbsoluteFrom(ev);
+      // Flush any motion still held in the sub-pixel remainder so the click
+      // lands where the pointer visibly is, not one event behind.
+      if (document.pointerLockElement !== element) sendDesktopMotion(ev);
       heldButtons.current.add(button);
       encoderRef.current.mouseButton(button, true, now());
       scheduleFlush();
@@ -368,6 +413,7 @@ export function useInputCapture(opts: InputCaptureOptions): InputCaptureState {
     };
 
     element.addEventListener('mousemove', onMouseMove);
+    element.addEventListener('mouseleave', onMouseLeave);
     element.addEventListener('mousedown', onMouseDown);
     window.addEventListener('mousedown', onDocMouseDown, { capture: true });
     window.addEventListener('mouseup', onMouseUp);
@@ -376,13 +422,14 @@ export function useInputCapture(opts: InputCaptureOptions): InputCaptureState {
 
     return () => {
       element.removeEventListener('mousemove', onMouseMove);
+      element.removeEventListener('mouseleave', onMouseLeave);
       element.removeEventListener('mousedown', onMouseDown);
       window.removeEventListener('mousedown', onDocMouseDown, { capture: true });
       window.removeEventListener('mouseup', onMouseUp);
       element.removeEventListener('wheel', onWheel);
       element.removeEventListener('contextmenu', onContextMenu);
     };
-  }, [enabled, flush, now, releaseHeldButtons, releaseHeldKeys, scheduleFlush, target, toNormalised]);
+  }, [enabled, flush, now, releaseHeldButtons, releaseHeldKeys, scheduleFlush, target, contentSize]);
 
   // ---- keyboard ------------------------------------------------------------
   useEffect(() => {
