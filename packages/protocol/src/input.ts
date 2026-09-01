@@ -4,8 +4,11 @@
  *
  * Design constraints:
  *  - Fixed-size, little-endian, naturally aligned so the C++ host can memcpy
- *    straight into a packed struct. include/glsplay_input.h mirrors this file
- *    exactly, and its static_asserts fail the build if the two ever drift.
+ *    straight into a packed struct. The host repo carries the C++ half of this
+ *    contract, glsplay_input.h - the same byte layout written a second time.
+ *    Change one and you must change the other. Its static_asserts only compare
+ *    the C++ structs against literals; they cannot see this file, so nothing
+ *    detects a mismatch until the host misparses live input.
  *  - Every event carries a client timestamp so the host can measure one-way
  *    input delivery latency without a round trip.
  *  - Multiple events may be concatenated into one DataChannel message. Mouse

@@ -87,12 +87,14 @@ Open items, roughly in the order they should be dealt with.
       Git (:104) download URLs. Both will break when those releases are pruned. Resolve
       the current LTS at runtime, or vendor the installers.
 
-- [ ] **Nothing keeps the wire format in sync across languages.** The opcodes live twice:
-      `packages/protocol/include/glsplay_input.h` for the host and
-      `packages/protocol/src/input.ts` for web. The header's `static_assert`s catch C++
-      drifting against itself but cannot see the TypeScript. Add a test asserting the TS
-      `EVENT_SIZE` table against sizes parsed from the header, before the protocol
-      starts changing.
+- [ ] **Nothing keeps the wire format in sync across languages, and now across repos.**
+      The opcodes live twice: `glsplay_input.h` in the host repo and
+      `packages/protocol/src/input.ts` here. The header's `static_assert`s catch C++
+      drifting against itself but cannot see the TypeScript, and the two halves no
+      longer appear in one diff, so co-location no longer covers it either. Two fixes,
+      both cheap: a wire-format version constant in both files, compared at the `hello`
+      handshake so a mismatch fails loudly at connect; and a byte-level fixture test
+      here asserting the encoder's exact output, so this side cannot drift unnoticed.
 
 - [ ] **Run `provision.ps1` and `bake-image.ps1` against a real instance.** Both are
       untested end to end. Most likely first failure is the `tools` stage (see pinned
