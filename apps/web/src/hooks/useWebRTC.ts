@@ -217,10 +217,17 @@ export function useWebRTC(config: WebRTCConfig | null) {
       // budget. A game stream would rather drop a late frame than delay every
       // frame, so ask for the minimum - it is a target, not a cap, and Chrome
       // still keeps whatever it needs to reassemble and reorder.
-      try {
-        (ev.receiver as RTCRtpReceiver & { jitterBufferTarget?: number }).jitterBufferTarget = 0;
-      } catch {
-        // Unsupported before Chrome 112; the adaptive default stays.
+      //
+      // Video only: ontrack also fires for the audio track, and a zero-target
+      // audio buffer turns every late packet into an audible gap. Audio needs
+      // its jitter buffer far more than video does, so leave it on Chrome's
+      // default.
+      if (ev.track.kind === 'video') {
+        try {
+          (ev.receiver as RTCRtpReceiver & { jitterBufferTarget?: number }).jitterBufferTarget = 0;
+        } catch {
+          // Unsupported before Chrome 112; the adaptive default stays.
+        }
       }
     };
 
