@@ -160,6 +160,18 @@ export function StreamPlayer({
     return () => cancelAnimationFrame(raf);
   }, [showSprite, captureSize, cursor?.width, cursor?.height, predictedCursor, videoRef]);
 
+  // Prefer unadjustedMovement: it delivers raw mouse deltas and stops Chrome
+  // from moving / re-centring the OS cursor under lock - which otherwise leaks
+  // a fixed ~half-window-width jump into movementX ~1x/second. Fall back to a
+  // plain lock where the option isn't supported (it rejects without locking).
+  const lockPointer = () => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.requestPointerLock({ unadjustedMovement: true }).catch(() => {
+      void video.requestPointerLock();
+    });
+  };
+
   const start = async () => {
     const video = videoRef.current;
     if (!video) return;
@@ -310,7 +322,7 @@ export function StreamPlayer({
       {started && !pointerLocked && !showOverlay && (
         <button
           type="button"
-          onClick={() => void videoRef.current?.requestPointerLock()}
+          onClick={lockPointer}
           className="absolute bottom-4 left-1/2 -translate-x-1/2 rounded-md border border-edge bg-panel/90 px-4 py-2 font-mono text-xs text-muted transition-colors hover:text-ink"
         >
           Capture mouse (for games) · Esc to release

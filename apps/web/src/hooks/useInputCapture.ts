@@ -53,6 +53,19 @@ const DOM_DELTA_PAGE = 2;
 const MAX_MOUSE_DELTA = 1200;
 
 /**
+ * Spike rejection for relative moves. Chrome's Pointer Lock, in its default
+ * "adjusted" mode, periodically warps the OS cursor back toward the centre of
+ * the locked element and leaks that warp into movementX/Y as a fixed jump of
+ * roughly half the window width (~1x/second, often a doubled pulse). Requesting
+ * unadjustedMovement stops the warp at the source; this is the backstop. A
+ * genuine flick ramps up - it never jumps to many times the recent average in
+ * one 1-2 ms sample - so an event that is both large in absolute terms and far
+ * above the running average is that warp, and is dropped whole.
+ */
+const SPIKE_ABS_PX = 120;
+const SPIKE_EMA_MULT = 8;
+
+/**
  * How long after the last relative move the pointer is considered "at rest".
  * While moving, the locally integrated position is authoritative and shown as
  * is - it tracks the hand exactly and needs no correction. Once the mouse has
@@ -118,6 +131,8 @@ export function useInputCapture(opts: InputCaptureOptions): InputCaptureState {
   const predictedCursor = useRef({ x: 0, y: 0 });
   /** performance.now() of the last relative move, for the settle check. */
   const lastMoveAtRef = useRef(0);
+  /** EMA of recent relative-move magnitude, for spike rejection. */
+  const moveMagEmaRef = useRef(0);
   /** Last pointer position over the video in CSS pixels, for desktop-mode
    *  delta derivation. Null until the pointer enters, so re-entering after a
    *  trip outside the element seeds rather than injects a jump. */
@@ -329,6 +344,13 @@ export function useInputCapture(opts: InputCaptureOptions): InputCaptureState {
         let dx = ev.movementX;
         let dy = ev.movementY;
         if (dx === 0 && dy === 0) return;
+        // Reject Chrome's Pointer Lock re-centre warp: a single event both large
+        // in absolute terms and far above the running average. Don't send it,
+        // don't integrate it, and don't let it move the average.
+        const mag = Math.hypot(dx, dy);
+        const ema = moveMagEmaRef.current;
+        if (mag > SPIKE_ABS_PX && mag > ema * SPIKE_EMA_MULT) return;
+        moveMagEmaRef.current = ema * 0.9 + mag * 0.1;
         dx = Math.max(-MAX_MOUSE_DELTA, Math.min(MAX_MOUSE_DELTA, dx));
         dy = Math.max(-MAX_MOUSE_DELTA, Math.min(MAX_MOUSE_DELTA, dy));
         // Integrate the delta locally so the cursor tracks the hand with no
