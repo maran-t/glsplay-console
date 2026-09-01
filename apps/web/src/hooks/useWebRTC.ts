@@ -211,6 +211,17 @@ export function useWebRTC(config: WebRTCConfig | null) {
     pc.ontrack = (ev: RTCTrackEvent) => {
       const [first] = ev.streams;
       if (first) setStream(first);
+      // Target the smallest playout buffer Chrome will accept. Its default
+      // adaptive buffer is tuned for conferencing and holds 50-200ms of video,
+      // which on its own overruns the whole PRD section 5 glass-to-glass
+      // budget. A game stream would rather drop a late frame than delay every
+      // frame, so ask for the minimum - it is a target, not a cap, and Chrome
+      // still keeps whatever it needs to reassemble and reorder.
+      try {
+        (ev.receiver as RTCRtpReceiver & { jitterBufferTarget?: number }).jitterBufferTarget = 0;
+      } catch {
+        // Unsupported before Chrome 112; the adaptive default stays.
+      }
     };
 
     pc.onconnectionstatechange = () => {
