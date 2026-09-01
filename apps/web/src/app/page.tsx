@@ -3,6 +3,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { StreamPlayer } from '@/components/StreamPlayer';
 import { StatsOverlay } from '@/components/StatsOverlay';
+import { SessionMenu } from '@/components/SessionMenu';
+import { ControlBar } from '@/components/ControlBar';
+import { useIdleReveal } from '@/hooks/useIdleReveal';
 import { useInputCapture } from '@/hooks/useInputCapture';
 import { useStreamStats } from '@/hooks/useStreamStats';
 import { useWebRTC, type WebRTCConfig } from '@/hooks/useWebRTC';
@@ -15,6 +18,16 @@ export default function Page() {
   const mainRef = useRef<HTMLElement>(null);
   const [hudVisible, setHudVisible] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  /** The bar's quick-action segments; the grip collapses it to one square. */
+  const [barExpanded, setBarExpanded] = useState(true);
+  const [muted, setMuted] = useState(false);
+  /** Set by Disconnect. Starves useWebRTC of a config, which tears the session
+   *  down through its existing cleanup rather than a second teardown path. */
+  const [ended, setEnded] = useState(false);
+  const [bitrateKbps, setBitrateKbps] = useState(DEFAULT_MAX_BITRATE_KBPS);
+  const [connectedAt, setConnectedAt] = useState<number | null>(null);
+  const [nowMs, setNowMs] = useState(() => Date.now());
 
   const toggleFullscreen = () => {
     if (document.fullscreenElement) {
@@ -92,8 +105,24 @@ export default function Page() {
     };
   }, []);
 
-  const { state, stream, peerConnection, sendInput, sendControl } = useWebRTC(config);
+  const { state, stream, peerConnection, sendInput, sendControl } = useWebRTC(
+    ended ? null : config,
+  );
   const stats = useStreamStats(peerConnection);
+
+  // Session clock. Stamped once when the peer connection first comes up, and
+  // ticked only while the guide is open - nothing else on the page displays it.
+  useEffect(() => {
+    if (state.connection === 'connected') setConnectedAt((at) => at ?? Date.now());
+    else if (state.connection === 'failed' || ended) setConnectedAt(null);
+  }, [state.connection, ended]);
+
+  useEffect(() => {
+    if (!menuOpen || connectedAt === null) return;
+    setNowMs(Date.now());
+    const id = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [menuOpen, connectedAt]);
 
   const captureSize = useMemo(
     () =>
@@ -105,18 +134,65 @@ export default function Page() {
     target: videoRef,
     sendInput,
     sendControl,
-    enabled: state.connection === 'connected',
+    // Suspended while the guide is open: a menu navigated with the keyboard
+    // cannot share a keyboard with the game underneath it.
+    enabled: state.connection === 'connected' && !menuOpen,
     captureSize,
     hostCursor: state.cursor,
   });
 
-  // F1 toggles the HUD. Handled here rather than in useInputCapture because it
-  // is a client-side control that must never reach the host.
+  // The trigger hides during mouselook - Pointer Lock still emits mousemove, so
+  // an ungated reveal would flash it through the whole session.
+  const chromeVisible = useIdleReveal(2500, !input.pointerLocked && !menuOpen);
+
+  const captureMouse = () => {
+    setMenuOpen(false);
+    const video = videoRef.current;
+    if (!video) return;
+    // Same preference as StreamPlayer: raw deltas, and no OS-cursor re-centring
+    // leaking into movementX. Falls back where the option is unsupported.
+    video.requestPointerLock({ unadjustedMovement: true }).catch(() => {
+      void video.requestPointerLock();
+    });
+  };
+
+  const setBitrate = (kbps: number) => {
+    setBitrateKbps(kbps);
+    sendControl({ type: 'set-bitrate', bitrateKbps: kbps });
+  };
+
+  const toggleMute = () => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.muted = !video.muted;
+    setMuted(video.muted);
+  };
+
+  // The video element owns the truth: StreamPlayer unmutes it on the start
+  // gesture without going through this state, so re-read it when the guide
+  // opens rather than trusting the last toggle.
+  useEffect(() => {
+    if (menuOpen) setMuted(videoRef.current?.muted ?? false);
+  }, [menuOpen]);
+
+  // Client-side keys, handled here rather than in useInputCapture because they
+  // must never reach the host.
+  //
+  // Escape opens the guide because it is the only key that can. Every letter is
+  // forwarded to the game while you are playing, so binding one would type into
+  // it; Escape is already special-cased as "let me go" and already drops
+  // Pointer Lock, so one press releases the mouse and raises the guide - the
+  // same gesture a console guide button performs.
   useEffect(() => {
     const onKey = (ev: KeyboardEvent) => {
-      if (ev.code !== 'F1') return;
-      ev.preventDefault();
-      setHudVisible((v) => !v);
+      if (ev.code === 'F1') {
+        ev.preventDefault();
+        setHudVisible((v) => !v);
+        return;
+      }
+      if (ev.code === 'Escape') {
+        setMenuOpen((v) => !v);
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -157,8 +233,10 @@ export default function Page() {
     );
   }
 
+  // overflow-hidden clips the control bar once it has slid off the right edge;
+  // without it the collapsed bar would extend the page.
   return (
-    <main ref={mainRef} className="relative h-full w-full bg-void">
+    <main ref={mainRef} className="relative h-full w-full overflow-hidden bg-void">
       <StreamPlayer
         stream={stream}
         videoRef={videoRef}
@@ -168,6 +246,7 @@ export default function Page() {
         signalingUrl={config.signalingUrl}
         hostPresent={state.hostPresent}
         pointerLocked={input.pointerLocked}
+        chromeVisible={chromeVisible}
         mode={input.mode}
         cursor={state.cursor}
         captureSize={captureSize}
@@ -186,22 +265,55 @@ export default function Page() {
         visible={hudVisible}
       />
 
-      <div className="absolute bottom-3 right-3 z-10 flex gap-2 font-mono text-[11px]">
-        <button
-          type="button"
-          onClick={() => setHudVisible((v) => !v)}
-          className="rounded-md border border-edge bg-panel/90 px-3 py-1.5 text-muted transition-colors hover:text-ink"
-        >
-          {hudVisible ? 'Hide stats' : 'Stats'}
-        </button>
-        <button
-          type="button"
-          onClick={toggleFullscreen}
-          className="rounded-md border border-edge bg-panel/90 px-3 py-1.5 text-muted transition-colors hover:text-ink"
-        >
-          {isFullscreen ? 'Exit full screen' : 'Full screen'}
-        </button>
-      </div>
+      <ControlBar
+        pointerLocked={input.pointerLocked}
+        expanded={barExpanded}
+        onToggleExpanded={() => setBarExpanded((v) => !v)}
+        hudVisible={hudVisible}
+        onToggleHud={() => setHudVisible((v) => !v)}
+        onOpenGuide={() => setMenuOpen(true)}
+      />
+
+      <SessionMenu
+        open={menuOpen}
+        onClose={() => setMenuOpen(false)}
+        roomId={config.roomId}
+        connection={state.connection}
+        hello={state.hello}
+        stats={stats}
+        connectedMs={connectedAt === null ? null : Math.max(0, nowMs - connectedAt)}
+        muted={muted}
+        onToggleMute={toggleMute}
+        statsVisible={hudVisible}
+        onToggleStats={() => setHudVisible((v) => !v)}
+        isFullscreen={isFullscreen}
+        onToggleFullscreen={toggleFullscreen}
+        onCaptureMouse={captureMouse}
+        bitrateKbps={bitrateKbps}
+        onSetBitrate={setBitrate}
+        onDisconnect={() => {
+          setMenuOpen(false);
+          setEnded(true);
+        }}
+      />
+
+      {ended && (
+        <div className="absolute inset-0 z-40 flex items-center justify-center bg-void/90">
+          <div className="flex w-[300px] flex-col gap-4 rounded-lg border border-edge bg-panel px-6 py-5 text-center font-mono">
+            <div className="text-[13px] text-ink">Session ended</div>
+            <div className="text-[11px] leading-relaxed text-muted">
+              The host is still running. Reconnecting rejoins the same room.
+            </div>
+            <button
+              type="button"
+              onClick={() => setEnded(false)}
+              className="rounded-md border border-signal/40 bg-signal/10 px-4 py-2 text-[12px] text-signal transition-colors hover:bg-signal/20"
+            >
+              Reconnect
+            </button>
+          </div>
+        </div>
+      )}
 
       {state.signaling === 'error' && (
         <div className="pointer-events-none absolute bottom-3 left-3 font-mono text-[10px] text-bad/80">

@@ -225,6 +225,17 @@ export function useInputCapture(opts: InputCaptureOptions): InputCaptureState {
     return { cw, ch };
   }, [target]);
 
+  // Switching capture off matters as much as losing focus: a key held at that
+  // moment has no keyup coming, and stays down on the remote desktop. The
+  // session guide suspends capture while it is open, so this is the ordinary
+  // path, not an edge case.
+  useEffect(() => {
+    if (enabled) return;
+    activeRef.current = false;
+    releaseHeldKeys();
+    releaseHeldButtons();
+  }, [enabled, releaseHeldButtons, releaseHeldKeys]);
+
   // ---- pointer lock ------------------------------------------------------
   useEffect(() => {
     if (!enabled) return;

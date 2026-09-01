@@ -14,6 +14,9 @@ export interface StreamPlayerProps {
   signalingUrl: string;
   hostPresent: boolean;
   pointerLocked: boolean;
+  /** Whether revealed chrome is currently shown. Shared with the page's menu
+   *  trigger so every control on the picture fades in and out together. */
+  chromeVisible: boolean;
   /** 'relative' = Pointer-Locked mouselook; 'absolute' = desktop pointer. */
   mode: 'relative' | 'absolute';
   /** Remote pointer, drawn client-side. Never baked into the video. */
@@ -75,6 +78,7 @@ export function StreamPlayer({
   signalingUrl,
   hostPresent,
   pointerLocked,
+  chromeVisible,
   mode,
   cursor,
   captureSize,
@@ -323,7 +327,9 @@ export function StreamPlayer({
         <button
           type="button"
           onClick={lockPointer}
-          className="absolute bottom-4 left-1/2 -translate-x-1/2 rounded-md border border-edge bg-panel/90 px-4 py-2 font-mono text-xs text-muted transition-colors hover:text-ink"
+          className={`absolute bottom-4 left-1/2 z-30 -translate-x-1/2 rounded-md border border-edge bg-panel/90 px-4 py-2 font-mono text-xs text-muted shadow-lg backdrop-blur-sm transition-opacity duration-300 hover:text-ink ${
+            chromeVisible ? 'opacity-100' : 'pointer-events-none opacity-0'
+          }`}
         >
           Capture mouse (for games) · Esc to release
         </button>
