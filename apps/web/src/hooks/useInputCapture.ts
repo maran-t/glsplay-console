@@ -133,6 +133,8 @@ export function useInputCapture(opts: InputCaptureOptions): InputCaptureState {
   const lastMoveAtRef = useRef(0);
   /** EMA of recent relative-move magnitude, for spike rejection. */
   const moveMagEmaRef = useRef(0);
+  /** Pending at-rest re-sync, at most one alive. See armSettle. */
+  const settleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** Last pointer position over the video in CSS pixels, for desktop-mode
    *  delta derivation. Null until the pointer enters, so re-entering after a
    *  trip outside the element seeds rather than injects a jump. */
@@ -280,6 +282,51 @@ export function useInputCapture(opts: InputCaptureOptions): InputCaptureState {
     predictedCursor.current = { x: hostCursor.x, y: hostCursor.y };
   }, [hostCursor, target]);
 
+  /**
+   * Runs that same re-sync on elapsed time, instead of waiting for another host
+   * cursor message to arrive and carry it.
+   *
+   * The effect above only runs when hostCursor changes identity, and the host
+   * only sends a cursor message when the pointer has actually moved - a still
+   * pointer costs nothing and reports nothing. Those two facts deadlock. A
+   * fresh message needs motion; the settle gate needs stillness. The last
+   * message therefore lands at the same instant motion stops, inside the gate,
+   * with nothing following it to try again. A game warp taken mid-sweep is
+   * never corrected: the drawn cursor sits where the real pointer is not, and
+   * clicks land where it isn't - until Pointer Lock is retaken and the
+   * handler above re-seeds. Whether it self-corrects comes down to timing
+   * jitter, which is what made it look intermittent.
+   *
+   * Firing on a timer closes it: whatever the host last reported is, once the
+   * pointer is at rest, the truth - message or no message.
+   */
+  const armSettle = useCallback(() => {
+    // One timer at a time. Re-arming per event would mean a setTimeout for
+    // every sample, and a high-rate mouse delivers a thousand a second.
+    if (settleTimer.current !== null) return;
+    const tick = () => {
+      settleTimer.current = null;
+      // Moved again while this was pending: wait out the remainder rather than
+      // snapping mid-motion, which is the stutter the settle gate exists for.
+      const since = performance.now() - lastMoveAtRef.current;
+      if (since < CURSOR_SETTLE_MS) {
+        settleTimer.current = setTimeout(tick, CURSOR_SETTLE_MS - since);
+        return;
+      }
+      if (document.pointerLockElement !== target.current) return;
+      const hc = hostCursorRef.current;
+      if (hc) predictedCursor.current = { x: hc.x, y: hc.y };
+    };
+    settleTimer.current = setTimeout(tick, CURSOR_SETTLE_MS);
+  }, [target]);
+
+  useEffect(
+    () => () => {
+      if (settleTimer.current !== null) clearTimeout(settleTimer.current);
+    },
+    [],
+  );
+
   // ---- mouse -----------------------------------------------------------
   useEffect(() => {
     if (!enabled) return;
@@ -382,6 +429,7 @@ export function useInputCapture(opts: InputCaptureOptions): InputCaptureState {
           y: cap ? Math.min(cap.h, Math.max(0, p.y + dy)) : p.y + dy,
         };
         lastMoveAtRef.current = performance.now();
+        armSettle();
         const encoder = encoderRef.current;
         if (!encoder.mouseMoveRelative(dx, dy, now())) {
           flush();
@@ -466,7 +514,7 @@ export function useInputCapture(opts: InputCaptureOptions): InputCaptureState {
       element.removeEventListener('wheel', onWheel);
       element.removeEventListener('contextmenu', onContextMenu);
     };
-  }, [enabled, flush, now, releaseHeldButtons, releaseHeldKeys, scheduleFlush, target, contentSize]);
+  }, [armSettle, enabled, flush, now, releaseHeldButtons, releaseHeldKeys, scheduleFlush, target, contentSize]);
 
   // ---- keyboard ------------------------------------------------------------
   useEffect(() => {
