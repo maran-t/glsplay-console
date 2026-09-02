@@ -10,8 +10,17 @@ import { useInputCapture } from '@/hooks/useInputCapture';
 import { useStreamStats } from '@/hooks/useStreamStats';
 import { useWebRTC, type WebRTCConfig } from '@/hooks/useWebRTC';
 
-/** PRD section 2 targets 15-25 Mbps CBR; the ceiling allows the stretch case. */
-const DEFAULT_MAX_BITRATE_KBPS = 25_000;
+/**
+ * PRD section 2 targets 15-25 Mbps CBR.
+ *
+ * Held at the 25 Mbps ceiling this link lost ~900 packets in 4.5 minutes and
+ * libwebrtc recovered every one with RTX retransmits (3045 of them), each
+ * costing a round trip the receiver then has to buffer for. FEC is negotiated
+ * (red/ulpfec) but libwebrtc declines to use it at this loss rate, so the
+ * retransmits are the whole recovery path. 15 Mbps is still inside the PRD
+ * band and below what Moonlight defaults to for 1080p60 (20 Mbps).
+ */
+const DEFAULT_MAX_BITRATE_KBPS = 15_000;
 
 export default function Page() {
   const videoRef = useRef<HTMLVideoElement>(null);
