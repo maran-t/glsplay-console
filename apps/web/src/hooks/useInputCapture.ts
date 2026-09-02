@@ -360,7 +360,11 @@ export function useInputCapture(opts: InputCaptureOptions): InputCaptureState {
         // don't integrate it, and don't let it move the average.
         const mag = Math.hypot(dx, dy);
         const ema = moveMagEmaRef.current;
-        if (mag > SPIKE_ABS_PX && mag > ema * SPIKE_EMA_MULT) return;
+        // Parked. unadjustedMovement already stops the warp at the source, so
+        // this only ever fires on a genuine fast flick - which it then discards
+        // whole, so the host never sees that motion and the aim sticks. The
+        // average is still tracked below, so restoring it is one uncomment.
+        // if (mag > SPIKE_ABS_PX && mag > ema * SPIKE_EMA_MULT) return;
         moveMagEmaRef.current = ema * 0.9 + mag * 0.1;
         dx = Math.max(-MAX_MOUSE_DELTA, Math.min(MAX_MOUSE_DELTA, dx));
         dy = Math.max(-MAX_MOUSE_DELTA, Math.min(MAX_MOUSE_DELTA, dy));
