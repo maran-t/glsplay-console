@@ -35,6 +35,9 @@ export default function Page() {
    *  down through its existing cleanup rather than a second teardown path. */
   const [ended, setEnded] = useState(false);
   const [bitrateKbps, setBitrateKbps] = useState(DEFAULT_MAX_BITRATE_KBPS);
+  /** See toggleUltra. Cleared whenever Pointer Lock or the session ends, so it
+   *  can never be left on over the desktop. */
+  const [ultraMode, setUltraMode] = useState(false);
   const [connectedAt, setConnectedAt] = useState<number | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
 
@@ -126,6 +129,7 @@ export default function Page() {
     else if (state.connection === 'failed' || ended) setConnectedAt(null);
   }, [state.connection, ended]);
 
+
   useEffect(() => {
     if (!menuOpen || connectedAt === null) return;
     setNowMs(Date.now());
@@ -150,6 +154,42 @@ export default function Page() {
     hostCursor: state.cursor,
   });
 
+  // Ultra mode follows Pointer Lock out, never in. Escape is how you leave a
+  // game, and leaving the host unclamped over the desktop is exactly the state
+  // that makes clicks land somewhere other than where the pointer is drawn.
+  //
+  // It also has to follow the session out. A peer that drops mid-game leaves
+  // Pointer Lock held - the video element is still there, so pointerlockchange
+  // never fires and the check below cannot see it - while the host has already
+  // cleared its own copy in InputDispatcher::ReleaseAll. Without this the two
+  // disagree on reconnect: the button reads active, the host is clamping, and
+  // pressing it sends enabled:false, so it takes two presses to turn on.
+  //
+  // Armed only once the lock has actually engaged: requestPointerLock resolves
+  // asynchronously, so without this the toggle would clear itself in the gap
+  // between pressing the button and the browser granting the lock.
+  const ultraLockSeen = useRef(false);
+  useEffect(() => {
+    if (!ultraMode) {
+      ultraLockSeen.current = false;
+      return;
+    }
+    if (state.connection !== 'connected' || ended) {
+      // Local only - sendControl would no-op on a closed channel anyway, and
+      // the host has already cleared it on its side.
+      ultraLockSeen.current = false;
+      setUltraMode(false);
+      return;
+    }
+    if (input.pointerLocked) {
+      ultraLockSeen.current = true;
+      return;
+    }
+    if (!ultraLockSeen.current) return;
+    setUltraMode(false);
+    sendControl({ type: 'set-ultra-mode', enabled: false });
+  }, [ultraMode, input.pointerLocked, state.connection, ended, sendControl]);
+
   // The trigger hides during mouselook - Pointer Lock still emits mousemove, so
   // an ungated reveal would flash it through the whole session.
   const chromeVisible = useIdleReveal(2500, !input.pointerLocked && !menuOpen);
@@ -163,6 +203,23 @@ export default function Page() {
     video.requestPointerLock({ unadjustedMovement: true }).catch(() => {
       void video.requestPointerLock();
     });
+  };
+
+  /**
+   * Ultra mode. Tells the host to inject relative mouse deltas verbatim instead
+   * of clamping them to the captured monitor - see SetUltraModeMessage for why
+   * that clamp cuts a mouselook sweep off at the screen edge.
+   *
+   * Turning it on takes Pointer Lock in the same gesture, because the two are
+   * only ever wanted together: unclamped deltas over the desktop would let the
+   * remote pointer drift away from the one the browser is drawing, and the bar
+   * hides itself under Pointer Lock anyway.
+   */
+  const toggleUltra = () => {
+    const next = !ultraMode;
+    setUltraMode(next);
+    sendControl({ type: 'set-ultra-mode', enabled: next });
+    if (next) captureMouse();
   };
 
   const setBitrate = (kbps: number) => {
@@ -281,6 +338,8 @@ export default function Page() {
         hudVisible={hudVisible}
         onToggleHud={() => setHudVisible((v) => !v)}
         onOpenGuide={() => setMenuOpen(true)}
+        ultraMode={ultraMode}
+        onToggleUltra={toggleUltra}
       />
 
       <SessionMenu
