@@ -31,6 +31,30 @@
   .tnum {
     font-variant-numeric: tabular-nums;
   }
+
+  /*
+   * The only moving thing on the connection card: the hop currently being
+   * attempted. A slow ring rather than a blink - it has to read as "still
+   * working" from across a desk without pulling the eye off the detail text
+   * beside it. Stopped for prefers-reduced-motion by the rule at the bottom
+   * of this file.
+   */
+  .hop-active {
+    animation: hop-pulse 1.9s ease-out infinite;
+  }
+}
+
+/* rgb() of theme('colors.warn'), which keyframes cannot reach through theme(). */
+@keyframes hop-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(224, 164, 69, 0.5);
+  }
+  70% {
+    box-shadow: 0 0 0 6px rgba(224, 164, 69, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(224, 164, 69, 0);
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

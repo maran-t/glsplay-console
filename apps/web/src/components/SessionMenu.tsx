@@ -11,6 +11,7 @@ import {
   QuitIcon,
   SoundIcon,
   StatsIcon,
+  UltraIcon,
 } from '@/components/icons';
 
 export interface SessionMenuProps {
@@ -29,6 +30,9 @@ export interface SessionMenuProps {
   isFullscreen: boolean;
   onToggleFullscreen: () => void;
   onCaptureMouse: () => void;
+  /** Ultra mode takes Pointer Lock in the same gesture - see toggleUltra. */
+  ultraMode: boolean;
+  onToggleUltra: () => void;
   bitrateKbps: number;
   onSetBitrate: (kbps: number) => void;
   onDisconnect: () => void;
@@ -109,6 +113,8 @@ export function SessionMenu({
   isFullscreen,
   onToggleFullscreen,
   onCaptureMouse,
+  ultraMode,
+  onToggleUltra,
   bitrateKbps,
   onSetBitrate,
   onDisconnect,
@@ -182,6 +188,12 @@ export function SessionMenu({
           icon={<PointerIcon size={22} />}
           label="Capture mouse"
           onClick={onCaptureMouse}
+        />
+        <Tile
+          icon={<UltraIcon size={22} />}
+          label="Capture mouse (ultra)"
+          active={ultraMode}
+          onClick={onToggleUltra}
         />
         <Tile
           icon={isFullscreen ? <FullscreenExitIcon size={22} /> : <FullscreenIcon size={22} />}

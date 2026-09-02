@@ -154,6 +154,15 @@ export default function Page() {
     hostCursor: state.cursor,
   });
 
+  // The bar is not rendered under Pointer Lock, so it always re-enters the
+  // picture on the way out - and re-entering at full width throws a strip of
+  // chrome across a game the moment you release the mouse. Collapse it as the
+  // lock is taken: what comes back is the grip alone, which is enough to say
+  // the controls are there, and one click re-opens them.
+  useEffect(() => {
+    if (input.pointerLocked) setBarExpanded(false);
+  }, [input.pointerLocked]);
+
   // Ultra mode follows Pointer Lock out, never in. Escape is how you leave a
   // game, and leaving the host unclamped over the desktop is exactly the state
   // that makes clicks land somewhere other than where the pointer is drawn.
@@ -310,6 +319,7 @@ export default function Page() {
         signaling={state.signaling}
         signalingDetail={state.signalingDetail}
         signalingUrl={config.signalingUrl}
+        roomId={config.roomId}
         hostPresent={state.hostPresent}
         pointerLocked={input.pointerLocked}
         chromeVisible={chromeVisible}
@@ -338,8 +348,6 @@ export default function Page() {
         hudVisible={hudVisible}
         onToggleHud={() => setHudVisible((v) => !v)}
         onOpenGuide={() => setMenuOpen(true)}
-        ultraMode={ultraMode}
-        onToggleUltra={toggleUltra}
       />
 
       <SessionMenu
@@ -357,6 +365,8 @@ export default function Page() {
         isFullscreen={isFullscreen}
         onToggleFullscreen={toggleFullscreen}
         onCaptureMouse={captureMouse}
+        ultraMode={ultraMode}
+        onToggleUltra={toggleUltra}
         bitrateKbps={bitrateKbps}
         onSetBitrate={setBitrate}
         onDisconnect={() => {

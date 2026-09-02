@@ -12,6 +12,8 @@ export interface StreamPlayerProps {
   signaling: SignalingState;
   signalingDetail: string | undefined;
   signalingUrl: string;
+  /** Shown on the connection card - which room this session is waiting on. */
+  roomId: string;
   hostPresent: boolean;
   pointerLocked: boolean;
   /** Whether revealed chrome is currently shown. Shared with the page's menu
@@ -28,28 +30,60 @@ export interface StreamPlayerProps {
   error: string | null;
 }
 
-/** One row of the connection checklist. */
-function Stage({
+type HopState = 'pending' | 'active' | 'done' | 'failed';
+
+/**
+ * One hop on the connection trace: broker, then host, then media.
+ *
+ * The three are drawn as a path rather than a checklist because that is what
+ * they are - the session is a route, and each hop only exists once the one
+ * before it landed. The spine is lit exactly as far as the connection got, so
+ * where the colour stops is where the session stopped, which is the one thing
+ * you need at a glance when a stream does not start.
+ *
+ * Failure is a square where the others are round: the trace stays readable
+ * without relying on the red.
+ */
+function Hop({
   label,
   state,
   detail,
+  last = false,
 }: {
   label: string;
-  state: 'pending' | 'active' | 'done' | 'failed';
-  detail?: string;
+  state: HopState;
+  detail?: React.ReactNode;
+  last?: boolean;
 }) {
-  const mark = { pending: '·', active: '…', done: '✓', failed: '✗' }[state];
-  const tone = {
-    pending: 'text-muted/50',
-    active: 'text-warn',
-    done: 'text-good',
+  const marker = {
+    pending: 'border-edge',
+    active: 'border-warn bg-warn/25 hop-active',
+    done: 'border-good bg-good',
+    failed: 'border-bad bg-bad rounded-[1px]',
+  }[state];
+
+  const labelTone = {
+    pending: 'text-muted/45',
+    active: 'text-ink',
+    done: 'text-ink',
     failed: 'text-bad',
   }[state];
+
   return (
-    <div className="flex items-baseline gap-2.5">
-      <span className={`w-3 shrink-0 text-center ${tone}`}>{mark}</span>
-      <span className={state === 'pending' ? 'text-muted/50' : 'text-ink'}>{label}</span>
-      {detail && <span className="truncate text-muted/70">{detail}</span>}
+    <div className="flex gap-3">
+      <div className="flex flex-col items-center">
+        <span
+          className={`mt-[3px] h-[9px] w-[9px] shrink-0 rounded-full border ${marker}`}
+          aria-hidden
+        />
+        {!last && <span className={`w-px flex-1 ${state === 'done' ? 'bg-good/40' : 'bg-edge'}`} />}
+      </div>
+      <div className={`min-w-0 flex-1 ${last ? '' : 'pb-3.5'}`}>
+        <div className={`text-[12px] leading-none ${labelTone}`}>{label}</div>
+        {detail && (
+          <div className="mt-1.5 break-all text-[11px] leading-relaxed text-muted/70">{detail}</div>
+        )}
+      </div>
     </div>
   );
 }
@@ -76,6 +110,7 @@ export function StreamPlayer({
   signaling,
   signalingDetail,
   signalingUrl,
+  roomId,
   hostPresent,
   pointerLocked,
   chromeVisible,
@@ -231,15 +266,43 @@ export function StreamPlayer({
     return null;
   })();
 
-  const hint = (() => {
-    if (signaling === 'error' || signaling === 'closed') {
-      return `Check the broker is running and reachable at ${signalingUrl}`;
-    }
-    if (signaling !== 'registered') return signalingUrl;
-    if (!hostPresent) return 'Start glsplay-host on the VM to begin streaming.';
-    if (connection === 'failed') return 'No direct path found - check UDP 50000-50100 on both firewalls.';
-    return undefined;
-  })();
+  // A short state for the card header, in the same shape the session guide
+  // uses, so the two screens read as one product rather than two.
+  const stateWord =
+    error ? 'error'
+    : signaling === 'error' ? 'no broker'
+    : signaling !== 'registered' ? 'connecting'
+    : !hostPresent ? 'no host'
+    : connection === 'failed' ? 'failed'
+    : connection === 'disconnected' ? 'reconnecting'
+    : 'negotiating';
+
+  const stateTone =
+    error || signaling === 'error' || connection === 'failed' ? 'text-bad' : 'text-warn';
+
+  // Every hop carries its own detail, so nothing is said twice: the header says
+  // how it is going, the trace says where it stopped and what to do about it.
+  const brokerDetail = (
+    <>
+      {signalingUrl}
+      {(signaling === 'error' || signaling === 'closed') && (
+        <span className="mt-1 block text-bad/80">
+          Check the broker is running and reachable.
+        </span>
+      )}
+      {signalingDetail && signaling !== 'registered' && (
+        <span className="mt-1 block text-bad/70">{signalingDetail}</span>
+      )}
+    </>
+  );
+
+  const hostDetail =
+    hostState === 'active' ? 'Start glsplay-host on the VM to begin streaming.' : undefined;
+
+  const mediaDetail =
+    mediaState === 'failed' ? 'No direct path found. Open UDP 50000-50100 on both firewalls.'
+    : connection !== 'new' ? connection
+    : undefined;
 
   const showStartGate = stream !== null && !started;
 
@@ -280,46 +343,58 @@ export function StreamPlayer({
       )}
 
       {showOverlay && headline && (
-        <div className="absolute inset-0 flex items-center justify-center">
-          <div className="flex w-[340px] flex-col gap-4 rounded-lg border border-edge bg-panel/92 px-6 py-5">
-            <div className="flex flex-col gap-1.5">
-              <div className={`font-mono text-sm ${headline.tone}`}>{headline.text}</div>
-              {hint && <div className="break-all text-xs leading-relaxed text-muted">{hint}</div>}
-              {signalingDetail && signaling !== 'registered' && (
-                <div className="break-all font-mono text-[11px] text-bad/80">{signalingDetail}</div>
-              )}
+        <div className="absolute inset-0 flex items-center justify-center p-6">
+          <div className="w-[360px] max-w-full rounded-lg border border-edge bg-panel/92 px-6 py-5 font-mono shadow-lg backdrop-blur-sm">
+            <div className="mb-5 flex items-baseline gap-3 text-[12px]">
+              <span className="font-semibold tracking-wide text-ink">glsplay</span>
+              <span className="truncate text-muted">{roomId}</span>
+              <span className={`ml-auto shrink-0 ${stateTone}`}>● {stateWord}</span>
             </div>
 
-            <div className="flex flex-col gap-1.5 border-t border-edge pt-3 font-mono text-[11px]">
-              <Stage label="Signaling broker" state={brokerState} />
-              <Stage label="Host present" state={hostState} />
-              <Stage
-                label="Media stream"
-                state={mediaState}
-                detail={connection !== 'new' ? connection : undefined}
-              />
-            </div>
+            {error && (
+              <div className="mb-4 break-all text-[11px] leading-relaxed text-bad">{error}</div>
+            )}
+
+            <Hop label="Signaling broker" state={brokerState} detail={brokerDetail} />
+            <Hop label="Host" state={hostState} detail={hostDetail} />
+            <Hop label="Media stream" state={mediaState} detail={mediaDetail} last />
           </div>
         </div>
       )}
 
       {showStartGate && (
+        // The gate is the last hop of the connection trace: everything landed,
+        // and the only thing left is the gesture the browser demands before it
+        // will play audio. So it holds the same header, and the scrim is light
+        // enough to read the first frame through - you can see what you are
+        // about to step into, which is also the reassurance that it worked.
         <button
           type="button"
           onClick={() => void start()}
-          className="absolute inset-0 flex cursor-pointer flex-col items-center justify-center gap-4 bg-void/70 backdrop-blur-sm transition-colors hover:bg-void/60"
+          className="group absolute inset-0 flex cursor-pointer flex-col items-center justify-center gap-6 bg-void/55 backdrop-blur-[3px] transition-colors hover:bg-void/45"
         >
-          <div className="rounded-full border border-signal/40 bg-signal/10 px-8 py-4 font-mono text-sm text-signal">
-            Click to start
+          <div className="flex items-baseline gap-3 font-mono text-[12px]">
+            <span className="font-semibold tracking-wide text-ink">glsplay</span>
+            <span className="truncate text-muted">{roomId}</span>
+            <span className="text-good">● ready</span>
           </div>
-          <div className="max-w-xs text-center text-xs leading-relaxed text-muted">
-            Starts audio and forwards your mouse and keyboard. Use the pointer
-            like a normal desktop; press <kbd className="rounded border border-edge px-1 font-mono">
-            Capture mouse
-            </kbd>{' '}
-            for mouselook games.
+
+          <span className="rounded-md bg-signal px-9 py-3.5 font-mono text-sm font-semibold text-void shadow-lg transition-transform duration-150 group-hover:scale-[1.02] group-active:scale-[0.99]">
+            Start session
+          </span>
+
+          <div className="flex max-w-[19rem] flex-col gap-1.5 text-center text-[11px] leading-relaxed text-muted">
+            <span>Turns on sound and sends your mouse and keyboard to the host.</span>
+            <span className="text-muted/60">
+              The pointer works like a desktop. Mouselook games need Capture mouse.
+            </span>
           </div>
-          {playbackError && <div className="font-mono text-xs text-bad">{playbackError}</div>}
+
+          {playbackError && (
+            <div className="max-w-[19rem] break-all text-center font-mono text-[11px] leading-relaxed text-bad">
+              The browser blocked playback: {playbackError}
+            </div>
+          )}
         </button>
       )}
 

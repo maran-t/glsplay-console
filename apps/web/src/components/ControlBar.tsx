@@ -1,6 +1,6 @@
 'use client';
 
-import { EmblemIcon, GripIcon, StatsIcon, UltraIcon } from '@/components/icons';
+import { EmblemIcon, GripIcon, StatsIcon } from '@/components/icons';
 
 export interface ControlBarProps {
   /** True while the host owns the mouse. The bar removes itself entirely. */
@@ -11,13 +11,6 @@ export interface ControlBarProps {
   hudVisible: boolean;
   onToggleHud: () => void;
   onOpenGuide: () => void;
-  /** Ultra mode: the host injects mouse deltas verbatim instead of clamping
-   *  them to the captured monitor, so a mouselook sweep is not cut off at the
-   *  screen edge. Turning it on takes Pointer Lock; leaving Pointer Lock turns
-   *  it back off, so it can never be left on over the desktop, where the clamp
-   *  is what keeps the pointer where the user is pointing. */
-  ultraMode: boolean;
-  onToggleUltra: () => void;
 }
 
 /**
@@ -67,8 +60,6 @@ export function ControlBar({
   hudVisible,
   onToggleHud,
   onOpenGuide,
-  ultraMode,
-  onToggleUltra,
 }: ControlBarProps) {
   if (pointerLocked) return null;
 
@@ -111,19 +102,6 @@ export function ControlBar({
         className={segment}
       >
         <EmblemIcon size={ICON_PX} />
-      </button>
-
-      <button
-        type="button"
-        onClick={onToggleUltra}
-        tabIndex={hidden}
-        aria-pressed={ultraMode}
-        title="Ultra mode - unrestricted mouse for games. Escape to leave."
-        aria-label="Toggle ultra mode"
-        style={{ width: SEGMENT_PX }}
-        className={`${segment} ${ultraMode ? 'text-ink' : ''}`}
-      >
-        <UltraIcon size={ICON_PX} />
       </button>
 
       <button
