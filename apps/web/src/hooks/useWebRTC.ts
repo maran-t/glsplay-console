@@ -223,10 +223,13 @@ export function useWebRTC(config: WebRTCConfig | null) {
       // its jitter buffer far more than video does, so leave it on Chrome's
       // default.
       if (ev.track.kind === 'video') {
+        const r = ev.receiver as RTCRtpReceiver & { jitterBufferTarget?: number | null };
         try {
-          (ev.receiver as RTCRtpReceiver & { jitterBufferTarget?: number }).jitterBufferTarget = 0;
-        } catch {
+          r.jitterBufferTarget = 0;
+          console.log('[glsplay] jitterBufferTarget set, reads back as:', r.jitterBufferTarget);
+        } catch (err) {
           // Unsupported before Chrome 112; the adaptive default stays.
+          console.warn('[glsplay] jitterBufferTarget not supported:', err);
         }
       }
     };
