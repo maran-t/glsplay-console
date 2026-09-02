@@ -156,9 +156,15 @@ export default function Page() {
 
   // Ultra mode follows Pointer Lock out, never in. Escape is how you leave a
   // game, and leaving the host unclamped over the desktop is exactly the state
-  // that makes clicks land somewhere other than where the pointer is drawn. The
-  // host clears its own copy on disconnect too, so a dropped peer cannot strand
-  // it either.
+  // that makes clicks land somewhere other than where the pointer is drawn.
+  //
+  // It also has to follow the session out. A peer that drops mid-game leaves
+  // Pointer Lock held - the video element is still there, so pointerlockchange
+  // never fires and the check below cannot see it - while the host has already
+  // cleared its own copy in InputDispatcher::ReleaseAll. Without this the two
+  // disagree on reconnect: the button reads active, the host is clamping, and
+  // pressing it sends enabled:false, so it takes two presses to turn on.
+  //
   // Armed only once the lock has actually engaged: requestPointerLock resolves
   // asynchronously, so without this the toggle would clear itself in the gap
   // between pressing the button and the browser granting the lock.
@@ -168,6 +174,13 @@ export default function Page() {
       ultraLockSeen.current = false;
       return;
     }
+    if (state.connection !== 'connected' || ended) {
+      // Local only - sendControl would no-op on a closed channel anyway, and
+      // the host has already cleared it on its side.
+      ultraLockSeen.current = false;
+      setUltraMode(false);
+      return;
+    }
     if (input.pointerLocked) {
       ultraLockSeen.current = true;
       return;
@@ -175,7 +188,7 @@ export default function Page() {
     if (!ultraLockSeen.current) return;
     setUltraMode(false);
     sendControl({ type: 'set-ultra-mode', enabled: false });
-  }, [ultraMode, input.pointerLocked, sendControl]);
+  }, [ultraMode, input.pointerLocked, state.connection, ended, sendControl]);
 
   // The trigger hides during mouselook - Pointer Lock still emits mousemove, so
   // an ungated reveal would flash it through the whole session.
