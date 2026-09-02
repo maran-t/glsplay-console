@@ -1,6 +1,6 @@
 /**
  * The whole icon set, hand-drawn as strokes on currentColor over one 14-unit
- * grid. Nine glyphs do not justify an icon dependency, and drawing them here
+ * grid. Ten glyphs do not justify an icon dependency, and drawing them here
  * keeps every stroke weight consistent with the 1px hairlines the rest of the
  * chrome is built from. `size` scales the drawing; the bar uses them at 14,
  * the guide tiles at 22.
@@ -82,6 +82,18 @@ export function PointerIcon({ size = 14 }: IconProps) {
   return (
     <svg {...props(size)}>
       <path d="M3 2.2l8 3.4-3.6 1.2L6 10.6 3 2.2z" />
+    </svg>
+  );
+}
+
+/** Four-way arrow - pointer travel with no edge to stop it, which is the whole
+ *  of what ultra mode changes. */
+export function UltraIcon({ size = 14 }: IconProps) {
+  return (
+    <svg {...props(size)}>
+      <path d="M7 2.2v9.6M2.2 7h9.6" />
+      <path d="M5.4 3.8L7 2.2l1.6 1.6M5.4 10.2L7 11.8l1.6-1.6" />
+      <path d="M3.8 5.4L2.2 7l1.6 1.6M10.2 5.4L11.8 7l-1.6 1.6" />
     </svg>
   );
 }

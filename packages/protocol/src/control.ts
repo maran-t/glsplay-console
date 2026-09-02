@@ -78,6 +78,28 @@ export interface SetPointerModeMessage {
 }
 
 /**
+ * Ultra mode: the host stops clamping relative mouse deltas to the captured
+ * monitor and injects them verbatim.
+ *
+ * The clamp keeps the desktop pointer off heads the user cannot see, and for
+ * desktop use it is right. For mouselook it is fatal - at a screen edge the
+ * clamped delta is zero, and the host filters a zero out before SendInput is
+ * ever called, so nothing reaches Windows' raw input stream at all. A game
+ * reading WM_INPUT stops turning about one screen-width into a sweep.
+ *
+ * Deliberately a button the user presses when they start playing, rather than
+ * something derived from Pointer Lock. This travels on the control channel
+ * while deltas travel on the input channel, and SCTP orders nothing between two
+ * streams - a mode that flipped on every lock transition raced the deltas it
+ * applied to and corrupted desktop pointing. Flipped twice a session, while the
+ * mouse is not being swept, that race has no window that matters.
+ */
+export interface SetUltraModeMessage {
+  type: 'set-ultra-mode';
+  enabled: boolean;
+}
+
+/**
  * Host tells the client to drop every held key. Sent on pointer-lock exit so
  * a key held at that moment does not stay latched down on the remote desktop.
  */
@@ -120,7 +142,8 @@ export type ClientToHostControl =
   | ControlPingMessage
   | SetBitrateMessage
   | RequestKeyframeMessage
-  | SetPointerModeMessage;
+  | SetPointerModeMessage
+  | SetUltraModeMessage;
 
 export type ControlMessage = HostToClientControl | ClientToHostControl;
 
