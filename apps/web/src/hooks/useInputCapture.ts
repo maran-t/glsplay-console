@@ -379,13 +379,9 @@ export function useInputCapture(opts: InputCaptureOptions): InputCaptureState {
         };
         lastMoveAtRef.current = performance.now();
         const encoder = encoderRef.current;
-        // Flagged Pointer-Locked so the host injects the delta verbatim. Without
-        // it the host clamps to the captured monitor, and once the OS cursor
-        // reaches an edge the injected delta is zero - which reads as the game's
-        // camera hitting a wall about one screen-width into a sweep.
-        if (!encoder.mouseMoveRelative(dx, dy, now(), true)) {
+        if (!encoder.mouseMoveRelative(dx, dy, now())) {
           flush();
-          encoder.mouseMoveRelative(dx, dy, now(), true);
+          encoder.mouseMoveRelative(dx, dy, now());
         }
         scheduleFlush();
         return;
