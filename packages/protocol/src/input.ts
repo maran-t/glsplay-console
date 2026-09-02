@@ -59,6 +59,19 @@ export const MouseButton = {
 export const Flags = {
   /** Key needs the 0xE0 extended scan-code prefix on injection. */
   Extended: 1 << 0,
+  /**
+   * Set on MouseMoveRelative when Pointer Lock was held as the delta was
+   * produced.
+   *
+   * The host clamps relative moves to the captured monitor so the desktop
+   * pointer cannot wander onto another head, but under mouselook that clamp
+   * zeroes the injected delta at the screen edge and the game's camera stops
+   * turning. The mode has to ride on the event rather than be held as host
+   * state set by a control message: input is an unordered, unreliable channel
+   * and control is a separate reliable one, so the two race on every Pointer
+   * Lock transition.
+   */
+  PointerLocked: 1 << 1,
 } as const;
 
 /** One wheel notch, matching Win32 WHEEL_DELTA. */
@@ -227,8 +240,17 @@ export class InputEncoder {
     return at + HEADER_SIZE;
   }
 
-  mouseMoveRelative(dx: number, dy: number, t: number): boolean {
-    const p = this.header(InputType.MouseMoveRelative, 0, t);
+  /**
+   * pointerLocked marks the delta as mouselook, which tells the host not to
+   * clamp it to the captured monitor. Desktop motion is sent through this same
+   * event type (see the client's sendDesktopMotion) and must leave it false.
+   */
+  mouseMoveRelative(dx: number, dy: number, t: number, pointerLocked = false): boolean {
+    const p = this.header(
+      InputType.MouseMoveRelative,
+      pointerLocked ? Flags.PointerLocked : 0,
+      t,
+    );
     if (p < 0) return false;
     this.view.setInt16(p, clampI16(dx), true);
     this.view.setInt16(p + 2, clampI16(dy), true);
