@@ -142,11 +142,6 @@ export function useInputCapture(opts: InputCaptureOptions): InputCaptureState {
   /** Sub-pixel remainder carried between desktop-mode moves. Without it, slow
    *  motion truncates to zero on every event and the pointer never starts. */
   const desktopRemainder = useRef({ x: 0, y: 0 });
-  /** Sub-pixel remainder carried between Pointer-Locked moves, for the same
-   *  reason as the desktop one: movementX/Y are CSS pixels and need not be
-   *  whole. See onMouseMove for why losing the fraction reads as low
-   *  sensitivity rather than as stutter. */
-  const relativeRemainder = useRef({ x: 0, y: 0 });
 
   useEffect(() => {
     captureSizeRef.current = captureSize;
@@ -254,7 +249,6 @@ export function useInputCapture(opts: InputCaptureOptions): InputCaptureState {
       // warped by the lock transition itself.
       lastDesktopPos.current = null;
       desktopRemainder.current = { x: 0, y: 0 };
-      relativeRemainder.current = { x: 0, y: 0 };
       if (locked) {
         swallowNextMove.current = true;
         activeRef.current = true;
@@ -421,22 +415,6 @@ export function useInputCapture(opts: InputCaptureOptions): InputCaptureState {
         moveMagEmaRef.current = ema * 0.9 + mag * 0.1;
         dx = Math.max(-MAX_MOUSE_DELTA, Math.min(MAX_MOUSE_DELTA, dx));
         dy = Math.max(-MAX_MOUSE_DELTA, Math.min(MAX_MOUSE_DELTA, dy));
-        // movementX/Y are CSS pixels and are not always whole: at any display
-        // scale or browser zoom other than 100%, one raw mouse count arrives as
-        // a fraction. The wire field is an int16 and the encoder truncates
-        // toward zero, so without carrying the remainder every single event
-        // loses up to a count - and at a 1000 Hz polling rate, where an event
-        // is only a count or two wide, that is most of the sweep. It does not
-        // read as stutter, it reads as the game turning too slowly no matter
-        // how far the hand travels, which is worst in a game whose own
-        // sensitivity is already low. Whole deltas leave the remainder at zero,
-        // so on an unscaled display this is exactly the old behaviour.
-        const rx = dx + relativeRemainder.current.x;
-        const ry = dy + relativeRemainder.current.y;
-        dx = Math.trunc(rx);
-        dy = Math.trunc(ry);
-        relativeRemainder.current = { x: rx - dx, y: ry - dy };
-        if (dx === 0 && dy === 0) return;
         // Integrate the delta locally so the cursor tracks the hand with no
         // round trip. The host injects these same deltas 1:1 (acceleration is
         // disabled there), so this stays in step with the real host pointer;
